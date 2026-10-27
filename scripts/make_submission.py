@@ -4,9 +4,9 @@
     python scripts/make_submission.py --config configs/x.yaml --team my_team
     python scripts/make_submission.py --method baseline --window 50
 
-Writes evaluation/results/<team>.csv, then runs the organisers' validation on it and prints what
-the file claims (label counts, possessions, mean duration). Frames outside the two graded halves
-are written as X.
+Writes results/<team>.csv, then runs the organisers' validation on it and prints what the file
+claims (label counts, possessions, mean duration). Frames outside the two graded halves are
+written as X.
 """
 
 import argparse
@@ -46,7 +46,7 @@ def main():
     parser.add_argument("--team", help="submission name (default: config)")
     parser.add_argument("--method", help="pipeline method (default: config)")
     parser.add_argument("--window", type=int, help="baseline smoothing half-width")
-    parser.add_argument("--out", help="output path (default: evaluation/results/<team>.csv)")
+    parser.add_argument("--out", help="output path (default: results/<team>.csv)")
     args = parser.parse_args()
 
     config = load_config(args.config)

@@ -20,7 +20,6 @@ dev = ["pytest==8.4.2"]
 
 [tool.setuptools]
 packages = ["mtah"]
-py-modules = ["games"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

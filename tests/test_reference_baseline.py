@@ -21,7 +21,7 @@ DATA_PRESENT = (paths.DATA_DIR / "tactical").is_dir()
 @pytest.mark.parametrize("window,name", [(0, "baseline_raw"), (50, "baseline_smooth50")])
 def test_matches_reference_baseline(window, name):
     tracking = load_tracking()
-    reference = read_submission(paths.RESULTS_DIR / f"{name}.csv")
+    reference = read_submission(paths.BASELINES_DIR / f"{name}.csv")
     ours = majority_smooth(nearest_team_codes(tracking), window)
     assert len(ours) == len(reference) == 199319
     mismatches = int(np.sum(ours != reference))

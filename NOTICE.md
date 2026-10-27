@@ -1,8 +1,9 @@
 # Third-party notices
 
-The following files are copied unmodified from the organisers' repository
+Everything under `vendor/mtah2027/` is copied **unmodified** from the organisers' repository
 [metrica-sports/more-than-a-hack-2027](https://github.com/metrica-sports/more-than-a-hack-2027),
-released under the MIT Licence (see `LICENSE-metrica-sports.txt`):
+released under the MIT Licence (`vendor/mtah2027/LICENSE`). The folder keeps the upstream layout so
+those scripts run as-is:
 
 - `games.py` — per-match constants, asset paths, graded frame blocks
 - `evaluation/possession_metrics.py` — the official metric library (spellF1, macroF1, ...)
@@ -13,6 +14,7 @@ released under the MIT Licence (see `LICENSE-metrica-sports.txt`):
 - `starter/baseline.py`, `starter/load_atd.py`, `starter/load_smart_tagging.py`,
   `starter/load_homography.py` — reference loaders and baseline
 
-`mtah/io.py` and `mtah/baseline.py` are re-implementations adapted from those starter files.
+Everything outside `vendor/` is original work of this repository. `mtah/io.py` and
+`mtah/baseline.py` are re-implementations adapted from the starter files above.
 
 The match data itself (`data/`) is **not** covered by that licence and is not in this repository.

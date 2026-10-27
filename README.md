@@ -14,16 +14,18 @@ test only. Full plan: `docs/`.
 
 ## Layout
 
+Everything outside `vendor/` is ours.
+
 ```
 mtah/                 the package: io (canonical tracking), labels, baseline, config, paths
 scripts/              check_data, make_submission, evaluate
 configs/default.yaml  team name, pipeline method, parameters
-evaluation/           organisers' scorer + validator + public GT (vendored, see NOTICE.md)
-starter/              organisers' reference loaders and baseline (vendored)
-games.py              organisers' per-match constants (vendored)
+results/              our submission CSV(s)
 cache/                parsed tracking (.npz), gitignored
 models/               trained weights, committed once frozen
 tests/
+vendor/mtah2027/      unmodified copies from the organisers' repo (MIT, see NOTICE.md):
+                      games.py, evaluation/ (scorer, validator, metrics, public GT, baselines), starter/
 ```
 
 ## Setup
@@ -40,10 +42,10 @@ The data bundle is gated and is never committed.
 ## Reproduce the submission
 
 ```bash
-make submission       # -> evaluation/results/<team>.csv  (team name in configs/default.yaml)
+make submission       # -> results/<team>.csv  (team name in configs/default.yaml)
 make validate         # official validator
-make evaluate         # public 5-minute smoke test (not a tuning set)
-make board            # official ranked board over evaluation/results/*.csv
+make evaluate         # public 5-minute smoke test, next to the published baseline (not a tuning set)
+make board            # official ranked board over results/*.csv
 make test
 ```
 

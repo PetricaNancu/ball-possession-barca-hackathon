@@ -1,11 +1,11 @@
 """Score one or more frame,label CSVs against any ground truth with the official metric library.
 
-    python scripts/evaluate.py evaluation/results/our_team.csv                 # public 5 min
+    python scripts/evaluate.py results/our_team.csv                          # public 5 min
     python scripts/evaluate.py pred.csv --gt path/to/external_match_gt.csv
     python scripts/evaluate.py a.csv b.csv --gt ... --bootstrap 1000 --json out.json
 
 For the full ranked board with reports, use the organisers' script unchanged:
-    python evaluation/run_evaluation.py --bootstrap 1000
+    python vendor/mtah2027/evaluation/run_evaluation.py --results results --bootstrap 1000
 """
 
 import argparse
@@ -25,7 +25,7 @@ KEYS = ("spell_f1_mean", "macro_f1", "n_pred_spells", "n_gt_spells", "mean_spell
 
 def resolve_gt(arg: str) -> str:
     if arg == "public":
-        hits = glob.glob(str(paths.ROOT / "evaluation" / "gt" / "*_possession_gt_public.csv"))
+        hits = glob.glob(str(paths.GT_DIR / "*_possession_gt_public.csv"))
         if len(hits) != 1:
             raise SystemExit(f"expected one public GT, found {hits}")
         return hits[0]
