@@ -1,0 +1,10 @@
+# Default configuration. Override any key with `--config path/to/other.yaml`.
+
+team: our_team            # names the submission file: evaluation/results/<team>.csv
+game: BAR-ATH
+
+pipeline:
+  method: baseline        # baseline | (engine, once Phase 2 lands)
+
+baseline:
+  window: 50              # half-width of the majority vote, in frames (25 fps)
