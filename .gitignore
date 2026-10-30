@@ -2,7 +2,7 @@
 # never be committed, nor anything that would reconstruct it (frame-level exports, clips).
 data/
 cache/
-corpus/
+corpus/*
 !corpus/noise_targets.json
 *.mp4
 *.parquet
