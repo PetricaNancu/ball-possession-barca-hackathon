@@ -10,7 +10,7 @@ submitted with the possession file.
 | 1 | [External training corpus](01-external-corpus.md) — Sportec ×7, Metrica ×3, labels, conventions | done |
 | 2 | [Label harmonisation](02-label-harmonisation.md) — DFL touches → Metrica/GT conventions, `T = 50` frames | done |
 | 3 | [Noise simulator](03-noise-simulator.md) — clean corpus → BAR-ATH-like tracking, validated against the published baseline | done |
-| 4 | Rule layer, features, emission models, decoder | next |
+| 4 | [The engine](04-engine.md) — rule layer, features, LightGBM, Viterbi; LOO spellF1 0.615 vs baseline 0.286 | done (v1) |
 | 5 | Ablations and reproduction | planned |
 
 Metric vocabulary (from the organisers' EVALUATION.md): **spellF1** = possession-level F1 over

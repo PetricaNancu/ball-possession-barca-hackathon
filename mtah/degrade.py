@@ -35,7 +35,8 @@ import numpy as np
 
 from . import paths
 from .io import AWAY, HOME, Tracking
-from .noise import ball_speed_from_positions, second_difference_std, slow_phases
+from .noise import (ball_speed_from_positions, moving_average_runs, second_difference_std,
+                    slow_phases)
 
 TARGETS_JSON = paths.ROOT / "corpus" / "noise_targets.json"
 TARGETS_NPZ = paths.ROOT / "corpus" / "noise_targets.npz"
@@ -112,25 +113,6 @@ class NoiseModel:
 # --------------------------------------------------------------------------------------------
 # Smoothing
 # --------------------------------------------------------------------------------------------
-
-def moving_average_runs(xy: np.ndarray, present: np.ndarray, window: int) -> np.ndarray:
-    """Centred moving average of each visible run separately (no bleeding across gaps)."""
-    if window <= 1:
-        return xy
-    out = xy.copy()
-    padded = np.concatenate(([False], present, [False]))
-    edges = np.flatnonzero(padded[1:] != padded[:-1])
-    kernel = np.ones(window) / window
-    half = window // 2
-    for start, end in zip(edges[0::2], edges[1::2]):
-        if end - start < window:
-            continue
-        for c in range(xy.shape[1]):
-            seg = xy[start:end, c]
-            ext = np.concatenate((np.full(half, seg[0]), seg, np.full(window - 1 - half, seg[-1])))
-            out[start:end, c] = np.convolve(ext, kernel, mode="valid")
-    return out
-
 
 def fit_smoothing_window(xy: np.ndarray, present: np.ndarray, target_jitter: float,
                          candidates=(1, 3, 5, 7, 9, 11, 15, 19, 25, 31, 41, 51),

@@ -6,8 +6,9 @@ import pytest
 
 import mtah  # noqa: F401
 from mtah import paths
-from mtah.degrade import NoiseModel, degrade, moving_average_runs
+from mtah.degrade import NoiseModel, degrade
 from mtah.io import Tracking
+from mtah.noise import moving_average_runs
 
 MODEL = paths.MODELS_DIR / "noise_model.npz"
 CLEAN = paths.CACHE_DIR / "J03WPY_sportec_tracking.npz"

@@ -13,6 +13,7 @@ corpus/*
 cache/*.npz
 corpus/*.npz
 !models/*.npz
+*.log
 
 # Private ground truth, should it ever land here by mistake
 *_possession_gt.csv

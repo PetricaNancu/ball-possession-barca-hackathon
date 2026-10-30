@@ -10,6 +10,7 @@ written as X.
 """
 
 import argparse
+import json
 
 import _bootstrap  # noqa: F401
 import numpy as np
@@ -23,11 +24,26 @@ from mtah.io import load_tracking
 from mtah.labels import mask_ungraded, spells, write_submission
 
 
+def engine_labels(tracking) -> np.ndarray:
+    from mtah.decode import decode
+    from mtah.features import compute_features
+    from mtah.model import load, predict_proba
+    booster, names = load(paths.MODELS_DIR)
+    X, feat_names = compute_features(tracking)
+    if feat_names != names:
+        raise ValueError("feature layout differs from the trained model; retrain (scripts/train.py)")
+    proba = predict_proba(booster, X)
+    decoder = json.loads((paths.MODELS_DIR / "decoder.json").read_text())
+    return decode(proba, tracking.blocks, **decoder)
+
+
 def build_labels(config: dict) -> np.ndarray:
     method = config["pipeline"]["method"]
     tracking = load_tracking(game=config["game"])
     if method == "baseline":
         return baseline_labels(tracking, window=int(config["baseline"]["window"]))
+    if method == "engine":
+        return engine_labels(tracking)
     raise ValueError(f"unknown pipeline method {method!r}")
 
 

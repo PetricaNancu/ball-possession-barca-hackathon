@@ -17,13 +17,17 @@ test only. Full plan: `docs/`.
 Everything outside `vendor/` is ours.
 
 ```
-mtah/                 the package: io (canonical tracking), external (other-match corpora), labels, baseline, config, paths
-scripts/              check_data, build_corpus, make_submission, evaluate
+mtah/                 the package: io (canonical tracking), external (other-match corpora), harmonise,
+                      noise + degrade (simulator), features (rule layer), model (LightGBM), decode (Viterbi),
+                      evaluate, labels, baseline, config, paths
+scripts/              check_data, build_corpus, analyze_conventions, noise_stats, fit_noise, train,
+                      make_submission, evaluate
 configs/default.yaml  team name, pipeline method, parameters
 results/              our submission CSV(s)
 cache/                parsed tracking (.npz), gitignored
-corpus/               external-match ground truths + baseline reference scores, gitignored (rebuilt by `make corpus`)
-models/               trained weights, committed once frozen
+corpus/               external-match ground truths, noise targets, CV results; gitignored except targets
+models/               committed artefacts: noise_model.npz, engine_lgbm.txt, engine_features.json, decoder.json
+docs/                 one file per step: method, metrics, caveats
 tests/
 vendor/mtah2027/      unmodified copies from the organisers' repo (MIT, see NOTICE.md):
                       games.py, evaluation/ (scorer, validator, metrics, public GT, baselines), starter/
@@ -43,8 +47,10 @@ The data bundle is gated and is never committed.
 ## External training corpus (other matches only)
 
 ```bash
-make corpus           # downloads the 7 Sportec/DFL open matches via kloppy (~2 min each), writes
-                      # cache/<id>_sportec_tracking.npz, corpus/gt/<id>_gt.csv, corpus/summary.json
+make corpus           # downloads the 7 Sportec/DFL open matches + 3 Metrica sample matches via kloppy
+                      # (~2 min each), writes cache/*.npz, corpus/gt/*.csv, corpus/summary.json
+make noise            # label-free BAR-ATH statistics -> fitted noise simulator -> validation
+make train            # leave-one-match-out CV on the degraded corpus, decoder tuning, final model
 ```
 
 Sportec/DFL open data: Bassek, M. et al. (2025), *An integrated dataset of spatiotemporal and

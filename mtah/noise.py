@@ -52,6 +52,39 @@ def second_difference_std(xy: np.ndarray, present: np.ndarray) -> float:
     return float(np.std(np.hypot(acc[ok, 0], acc[ok, 1])))
 
 
+def moving_average_runs(xy: np.ndarray, present: np.ndarray, window: int) -> np.ndarray:
+    """Centred moving average of each visible run separately (no bleeding across gaps)."""
+    if window <= 1:
+        return xy
+    out = xy.copy()
+    padded = np.concatenate(([False], present, [False]))
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    kernel = np.ones(window) / window
+    half = window // 2
+    for start, end in zip(edges[0::2], edges[1::2]):
+        if end - start < window:
+            continue
+        for c in range(xy.shape[1]):
+            seg = xy[start:end, c]
+            ext = np.concatenate((np.full(half, seg[0]), seg, np.full(window - 1 - half, seg[-1])))
+            out[start:end, c] = np.convolve(ext, kernel, mode="valid")
+    return out
+
+
+def rolling_mean(values: np.ndarray, half_window: int) -> np.ndarray:
+    """Centred NaN-aware rolling mean over +/- half_window frames, O(n) via cumulative sums."""
+    v = np.asarray(values, dtype=np.float64)
+    ok = np.isfinite(v)
+    csum = np.concatenate(([0.0], np.cumsum(np.where(ok, v, 0.0))))
+    ccnt = np.concatenate(([0], np.cumsum(ok)))
+    idx = np.arange(len(v))
+    lo = np.maximum(0, idx - half_window)
+    hi = np.minimum(len(v), idx + half_window + 1)
+    count = ccnt[hi] - ccnt[lo]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(count > 0, (csum[hi] - csum[lo]) / count, np.nan)
+
+
 def collective_speed(players: np.ndarray, fps: float, smooth_frames: int = 25,
                      max_mps: float = 12.0) -> np.ndarray:
     """(N,) mean speed of the tracked players, m/s, smoothed over a centred window.

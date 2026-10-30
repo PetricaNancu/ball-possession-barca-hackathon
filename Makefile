@@ -7,13 +7,14 @@ TEAM      ?= $(shell $(PY) -c "import yaml;print(yaml.safe_load(open('configs/de
 MTAH_DATA_DIR ?= $(abspath ../more-than-a-hack-2027/data)
 export MTAH_DATA_DIR
 
-.PHONY: help setup check corpus noise baseline submission validate evaluate board test clean
+.PHONY: help setup check corpus noise train baseline submission validate evaluate board test clean
 
 help:
 	@echo "setup       create .venv and install pinned dependencies"
 	@echo "check       verify the data bundle, build the tracking cache, print statistics"
 	@echo "corpus      download + convert the external training matches (Sportec + Metrica)"
 	@echo "noise       measure BAR-ATH noise targets, fit + validate the noise simulator"
+	@echo "train       leave-one-match-out CV on the degraded corpus, tune decoder, fit final model"
 	@echo "baseline    reproduce the organisers' baseline through our loader (loader test)"
 	@echo "submission  build results/$(TEAM).csv and validate it"
 	@echo "validate    run the official validator on the submission"
@@ -36,6 +37,9 @@ corpus:
 noise:
 	$(PY) scripts/noise_stats.py --json corpus/noise_targets.json
 	$(PY) scripts/fit_noise.py
+
+train:
+	$(PY) scripts/train.py
 
 baseline:
 	$(PY) scripts/make_submission.py --method baseline --window 50 --team ours_baseline50
