@@ -22,7 +22,9 @@ def test_external_tracking_invariants(path):
     graded = tr.graded_mask()
     assert set(np.unique(tr.labels[graded])) <= {"H", "A", "D"}
     assert set(np.unique(tr.labels[~graded])) <= {"X"}
-    assert (tr.player_present[graded].sum(axis=1) == 22).all()
+    # 22 on the pitch, fewer after a red card, 23 on substitution-overlap frames.
+    per_frame = tr.player_present[graded].sum(axis=1)
+    assert per_frame.min() >= 20 and per_frame.max() <= 23
     assert not tr.player_present[~graded].any()
     if tr.source == "sportec":
         assert tr.ball_present[graded].all()
