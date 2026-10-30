@@ -3,12 +3,16 @@
 data/
 cache/
 corpus/
+!corpus/noise_targets.json
 *.mp4
-*.npz
 *.parquet
 *.pkl
 *.pl3container
 *.gzip
+# .npz caches are large and regenerable; the fitted noise model is small and part of the method
+cache/*.npz
+corpus/*.npz
+!models/*.npz
 
 # Private ground truth, should it ever land here by mistake
 *_possession_gt.csv

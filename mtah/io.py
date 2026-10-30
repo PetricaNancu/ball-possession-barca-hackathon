@@ -190,7 +190,10 @@ def load_tracking(game: str = games.GAME, source: str = games.DEFAULT_SOURCE,
     """
     cached = cache_path(game, source)
     if use_cache and cached.is_file():
-        return Tracking.load(cached)
+        tracking = Tracking.load(cached)
+        if tracking.blocks is not None:
+            return tracking
+        # cache written before `blocks` existed: rebuild
 
     meta_path, raw_path = games.require(["atd_meta", "atd_raw"], game, None, source)
     meta = read_atd_meta(meta_path)
