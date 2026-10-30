@@ -8,3 +8,9 @@ pipeline:
 
 baseline:
   window: 50              # half-width of the majority vote, in frames (25 fps)
+
+corpus:
+  # DFL BallPossession flips on single touches; spells shorter than this, sandwiched between the
+  # same opponent, are relabelled to that opponent (docs/02-label-harmonisation.md). Chosen by
+  # matching Metrica's possession-duration distribution: KS-optimal 62, count-optimal 50.
+  sportec_sandwich_max_frames: 50

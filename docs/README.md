@@ -8,8 +8,8 @@ submitted with the possession file.
 |---|---|---|
 | 0 | Scaffolding, canonical loader, vendored scorer, baseline reproduced bit-for-bit | done (README) |
 | 1 | [External training corpus](01-external-corpus.md) — Sportec ×7, Metrica ×3, labels, conventions | done |
-| 2 | Label harmonisation (DFL → Metrica/GT conventions) | next |
-| 3 | Noise simulator and its validation against the BAR-ATH baseline | planned |
+| 2 | [Label harmonisation](02-label-harmonisation.md) — DFL touches → Metrica/GT conventions, `T = 50` frames | done |
+| 3 | Noise simulator and its validation against the BAR-ATH baseline | next |
 | 4 | Rule layer, features, emission models, decoder | planned |
 | 5 | Ablations and reproduction | planned |
 

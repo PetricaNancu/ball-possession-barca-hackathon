@@ -263,10 +263,21 @@ def load_metrica_sample(match_id: int, use_cache: bool = True) -> Tracking:
     return tracking
 
 
-def write_corpus_gt(tracking: Tracking, out_dir: Path = CORPUS_GT_DIR) -> Path:
-    """frame,label CSV for the official scorer (`--gt <path>`), X outside the graded blocks."""
+def write_corpus_gt(tracking: Tracking, out_dir: Path = CORPUS_GT_DIR,
+                    sandwich_max_frames: int = 0) -> Path:
+    """frame,label CSVs for the official scorer: <id>_gt.csv (harmonised) and <id>_gt_raw.csv."""
+    from .harmonise import harmonise
     from .labels import write_submission
-    return write_submission(Path(out_dir) / f"{tracking.game}_gt.csv", tracking.labels)
+    out_dir = Path(out_dir)
+    write_submission(out_dir / f"{tracking.game}_gt_raw.csv", tracking.labels)
+    return write_submission(out_dir / f"{tracking.game}_gt.csv",
+                            harmonise(tracking.labels, tracking.source, sandwich_max_frames))
+
+
+def corpus_labels(tracking: Tracking, sandwich_max_frames: int) -> np.ndarray:
+    """The labels to train and score on: harmonised to the GT's conventions."""
+    from .harmonise import harmonise
+    return harmonise(tracking.labels, tracking.source, sandwich_max_frames)
 
 
 def load_external(match_id: str, use_cache: bool = True) -> Tracking:

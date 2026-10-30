@@ -22,19 +22,21 @@ import numpy as np
 import possession_metrics as pm
 from mtah import paths
 from mtah.baseline import baseline_labels
-from mtah.external import (CORPUS_GT_DIR, METRICA_MATCHES, SPORTEC_MATCHES, load_external,
-                           write_corpus_gt)
+from mtah.config import load_config
+from mtah.external import (CORPUS_GT_DIR, METRICA_MATCHES, SPORTEC_MATCHES, corpus_labels,
+                           load_external, write_corpus_gt)
 from mtah.labels import mask_by_blocks, spells, write_submission
 
 SUMMARY_PATH = paths.ROOT / "corpus" / "summary.json"
 
 
-def summarize(tr, baseline_window: int) -> dict:
+def summarize(tr, baseline_window: int, sandwich_max_frames: int) -> dict:
     graded = tr.graded_mask()
-    labels = tr.labels
+    labels = corpus_labels(tr, sandwich_max_frames)
     counts = {k: int(((labels == k) & graded).sum()) for k in ("H", "A", "D")}
     runs = spells(labels)
     durations = np.array([e - s for _, s, e in runs]) / tr.fps
+    n_raw = len(spells(tr.labels))
 
     pred = mask_by_blocks(baseline_labels(tr, window=baseline_window), tr.blocks)
     pred_path = write_submission(paths.ROOT / "corpus" / "baseline" / f"{tr.game}_smooth{baseline_window}.csv", pred)
@@ -48,6 +50,8 @@ def summarize(tr, baseline_window: int) -> dict:
         "label_counts_graded": counts, "d_share_graded": counts["D"] / max(1, graded.sum()),
         "ball_present_graded": float(tr.ball_present[graded].mean()),
         "players_per_frame_graded": float(tr.player_present[graded].sum(axis=1).mean()),
+        "sandwich_max_frames": sandwich_max_frames if tr.source == "sportec" else 0,
+        "n_possessions_raw": n_raw,
         "n_possessions": len(runs), "mean_possession_s": float(durations.mean()),
         "median_possession_s": float(np.median(durations)),
         "possessions_under_1s": int((durations < 1.0).sum()),
@@ -66,7 +70,9 @@ def main():
                         default=list(SPORTEC_MATCHES) + list(METRICA_MATCHES))
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--window", type=int, default=50, help="baseline half-width")
+    parser.add_argument("--config", help="YAML overriding configs/default.yaml")
     args = parser.parse_args()
+    sandwich = int(load_config(args.config)["corpus"]["sportec_sandwich_max_frames"])
 
     summaries = {}
     if SUMMARY_PATH.is_file():
@@ -75,16 +81,16 @@ def main():
     for match_id in args.matches:
         t0 = time.time()
         tr = load_external(match_id, use_cache=not args.force)
-        write_corpus_gt(tr)
-        info = summarize(tr, args.window)
+        write_corpus_gt(tr, sandwich_max_frames=sandwich)
+        info = summarize(tr, args.window, sandwich)
         summaries[match_id] = info
         SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
         SUMMARY_PATH.write_text(json.dumps(summaries, indent=2))
         b = info[f"baseline_smooth{args.window}"]
         print(f"{match_id}  {info['home']} vs {info['away']}  {time.time() - t0:5.0f}s  "
               f"frames {info['n_frames']}  graded {info['n_graded']}  D {info['d_share_graded']:.0%}  "
-              f"poss {info['n_possessions']} (mean {info['mean_possession_s']:.1f}s, "
-              f"<2s: {info['possessions_under_2s']})  "
+              f"poss {info['n_possessions']} (raw {info['n_possessions_raw']}, mean "
+              f"{info['mean_possession_s']:.1f}s, <2s: {info['possessions_under_2s']})  "
               f"baseline spellF1 {b['spell_f1']:.3f} macroF1 {b['macro_f1']:.3f} "
               f"pred {b['n_pred_spells']} recD {b['recall_D']:.2f}")
 
