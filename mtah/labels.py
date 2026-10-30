@@ -40,6 +40,16 @@ def mask_ungraded(labels: np.ndarray, game: str = games.GAME) -> np.ndarray:
     return out
 
 
+def mask_by_blocks(labels: np.ndarray, blocks) -> np.ndarray:
+    """Same as mask_ungraded, for a match whose graded blocks are given explicitly."""
+    out = np.asarray(labels, dtype="<U1").copy()
+    keep = np.zeros(len(out), dtype=bool)
+    for _, first, last in blocks:
+        keep[first:last + 1] = True
+    out[~keep] = "X"
+    return out
+
+
 def write_submission(path: Path, labels: np.ndarray) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

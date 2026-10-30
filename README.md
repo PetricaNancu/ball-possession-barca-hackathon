@@ -17,11 +17,12 @@ test only. Full plan: `docs/`.
 Everything outside `vendor/` is ours.
 
 ```
-mtah/                 the package: io (canonical tracking), labels, baseline, config, paths
-scripts/              check_data, make_submission, evaluate
+mtah/                 the package: io (canonical tracking), external (other-match corpora), labels, baseline, config, paths
+scripts/              check_data, build_corpus, make_submission, evaluate
 configs/default.yaml  team name, pipeline method, parameters
 results/              our submission CSV(s)
 cache/                parsed tracking (.npz), gitignored
+corpus/               external-match ground truths + baseline reference scores, gitignored (rebuilt by `make corpus`)
 models/               trained weights, committed once frozen
 tests/
 vendor/mtah2027/      unmodified copies from the organisers' repo (MIT, see NOTICE.md):
@@ -38,6 +39,17 @@ make check                                 # verifies alignment, builds the cach
 
 If `MTAH_DATA_DIR` is unset, `../more-than-a-hack-2027/data` is used when it exists.
 The data bundle is gated and is never committed.
+
+## External training corpus (other matches only)
+
+```bash
+make corpus           # downloads the 7 Sportec/DFL open matches via kloppy (~2 min each), writes
+                      # cache/<id>_sportec_tracking.npz, corpus/gt/<id>_gt.csv, corpus/summary.json
+```
+
+Sportec/DFL open data: Bassek, M. et al. (2025), *An integrated dataset of spatiotemporal and
+event data in elite soccer*, Scientific Data, https://doi.org/10.1038/s41597-025-04505-y.
+Per-frame `BallStatus` and `BallPossession` map directly to the challenge's `D` / `H` / `A`.
 
 ## Reproduce the submission
 

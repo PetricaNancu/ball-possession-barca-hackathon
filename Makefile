@@ -7,11 +7,12 @@ TEAM      ?= $(shell $(PY) -c "import yaml;print(yaml.safe_load(open('configs/de
 MTAH_DATA_DIR ?= $(abspath ../more-than-a-hack-2027/data)
 export MTAH_DATA_DIR
 
-.PHONY: help setup check baseline submission validate evaluate board test clean
+.PHONY: help setup check corpus baseline submission validate evaluate board test clean
 
 help:
 	@echo "setup       create .venv and install pinned dependencies"
 	@echo "check       verify the data bundle, build the tracking cache, print statistics"
+	@echo "corpus      download + convert the external training matches (Sportec open data)"
 	@echo "baseline    reproduce the organisers' baseline through our loader (loader test)"
 	@echo "submission  build results/$(TEAM).csv and validate it"
 	@echo "validate    run the official validator on the submission"
@@ -27,6 +28,9 @@ setup:
 
 check:
 	$(PY) scripts/check_data.py
+
+corpus:
+	$(PY) scripts/build_corpus.py
 
 baseline:
 	$(PY) scripts/make_submission.py --method baseline --window 50 --team ours_baseline50

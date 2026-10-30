@@ -15,6 +15,7 @@ Missing observations are NaN. frame_id counts from 1; submissions count from 0.
 from __future__ import annotations
 
 import io
+import json
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,7 @@ class Tracking:
     game: str
     source: str
     labels: Optional[np.ndarray] = None   # (N,) '<U1' in {H, A, D, X}; external matches only
+    blocks: Optional[np.ndarray] = None   # (K, 3) int64 rows (half, first_frame, last_frame)
     meta: dict = field(default_factory=dict)
 
     @property
@@ -62,6 +64,19 @@ class Tracking:
     def player_present(self) -> np.ndarray:
         return ~np.isnan(self.players[:, :, 0])
 
+    def graded_mask(self) -> np.ndarray:
+        mask = np.zeros(self.n_frames, dtype=bool)
+        for _, first, last in self.blocks:
+            mask[first:last + 1] = True
+        return mask
+
+    def half_of_frame(self) -> np.ndarray:
+        """(N,) int8: half number inside a graded block, 0 elsewhere."""
+        half = np.zeros(self.n_frames, dtype=np.int8)
+        for h, first, last in self.blocks:
+            half[first:last + 1] = h
+        return half
+
     def save(self, path: Path) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,6 +84,8 @@ class Tracking:
             "ball": self.ball, "players": self.players, "team_of_slot": self.team_of_slot,
             "fps": np.float64(self.fps), "pitch": np.asarray(self.pitch, dtype=np.float64),
             "game": np.array(self.game), "source": np.array(self.source),
+            "blocks": np.asarray(self.blocks, dtype=np.int64),
+            "meta_json": np.array(json.dumps(self.meta)),
         }
         if self.labels is not None:
             payload["labels"] = self.labels
@@ -83,6 +100,8 @@ class Tracking:
                 fps=float(z["fps"]), pitch=tuple(z["pitch"].tolist()),
                 game=str(z["game"]), source=str(z["source"]),
                 labels=z["labels"] if "labels" in z.files else None,
+                blocks=z["blocks"] if "blocks" in z.files else None,
+                meta=json.loads(str(z["meta_json"])) if "meta_json" in z.files else {},
             )
 
 
@@ -189,6 +208,7 @@ def load_tracking(game: str = games.GAME, source: str = games.DEFAULT_SOURCE,
         ball=_to_metres(ball_norm, pitch), players=_to_metres(players_norm, pitch),
         team_of_slot=meta["team_of_slot"], fps=float(games.GAMES[game]["fps"]),
         pitch=pitch, game=game, source=source,
+        blocks=np.asarray(games.half_video_blocks(game), dtype=np.int64),
         meta={"home_name": meta["home_name"], "away_name": meta["away_name"]},
     )
     if use_cache:

@@ -2,6 +2,7 @@
 # never be committed, nor anything that would reconstruct it (frame-level exports, clips).
 data/
 cache/
+corpus/
 *.mp4
 *.npz
 *.parquet
