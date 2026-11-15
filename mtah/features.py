@@ -72,6 +72,56 @@ def _frames_until(valid: np.ndarray, cap: int) -> np.ndarray:
     return _frames_since(valid[::-1], cap)[::-1]
 
 
+def one_sided_mean(values: np.ndarray, window: int, forward: bool = False) -> np.ndarray:
+    """One-sided NaN-aware rolling mean over [t-window, t] (backward) or [t, t+window] (forward)."""
+    if window <= 0:
+        return np.asarray(values, dtype=np.float32).copy()
+    arr = np.asarray(values, dtype=np.float64)
+    if forward:
+        arr = arr[::-1]
+    valid = np.isfinite(arr)
+    vals = np.where(valid, arr, 0.0)
+    csum = np.concatenate(([0.0], np.cumsum(vals, dtype=np.float64)))
+    ccnt = np.concatenate(([0], np.cumsum(valid.astype(np.int64))))
+    idx = np.arange(len(arr))
+    lo = np.maximum(0, idx - window)
+    hi = idx + 1
+    num = csum[hi] - csum[lo]
+    den = ccnt[hi] - ccnt[lo]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.where(den > 0, num / np.maximum(den, 1), np.nan).astype(np.float32)
+    return out[::-1] if forward else out
+
+
+def oob_latch_feature(bx: np.ndarray, by: np.ndarray, known: np.ndarray, speed: np.ndarray,
+                      coll_spd: np.ndarray, pitch: tuple, blocks) -> np.ndarray:
+    """Out-of-bounds dead-ball latch: turns 1 when the ball crosses outside the pitch and future
+    collective speed drops < 1.45 m/s (confirming a stoppage), staying 1 until the restart kick."""
+    L, W = pitch
+    n = len(bx)
+    oob = known & ((bx < -0.3) | (bx > L + 0.3) | (by < -0.3) | (by > W + 0.3))
+    latched = np.zeros(n, dtype=np.float32)
+    for _, first, last in blocks:
+        state, dur, passed_min = 0.0, 0, False
+        for t in range(first, last + 1):
+            if oob[t]:
+                fut_cs = coll_spd[t:min(last + 1, t + 250)]
+                min_fut = float(np.nanmin(fut_cs)) if len(fut_cs) else 2.0
+                if min_fut < 1.45:
+                    state, dur, passed_min = 1.0, 0, False
+            elif state > 0:
+                dur += 1
+                cs = coll_spd[t] if np.isfinite(coll_spd[t]) else 0.0
+                if cs < 1.45:
+                    passed_min = True
+                in_pitch = known[t] and (0.0 <= bx[t] <= L) and (0.0 <= by[t] <= W)
+                sp = speed[t] if np.isfinite(speed[t]) else 0.0
+                if (in_pitch and sp > 6.8 and dur > 25 and passed_min) or (passed_min and cs > 1.95) or dur > 600:
+                    state = 0.0
+            latched[t] = state
+    return latched
+
+
 def fill_ball_gaps(ball_xy: np.ndarray, blocks, max_fill: int = MAX_FILL_FRAMES):
     """Linear interpolation of short gaps inside a block. Returns (filled_xy, interpolated_mask)."""
     out = ball_xy.copy()
@@ -284,6 +334,69 @@ def compute_features(tr: Tracking) -> tuple[np.ndarray, list[str]]:
                  "ball_observed", "collective_speed", "control_sgn", "ball_oob"):
         for half in (12, 50, 150):
             feats[f"{name}_rm{half}"] = rolling_mean(feats[name], half)
+
+    # ---- enhanced rule & directional features (v2) ----------------------------------------
+    d_opp_val = np.maximum(feats["d_ball_H1"], feats["d_ball_A1"])
+    feats["d_opp"] = np.where(np.isfinite(d_opp_val), d_opp_val, np.nan)
+    feats["d_opp_rm50"] = rolling_mean(feats["d_opp"], 50)
+
+    real = known & ~interp
+    with np.errstate(invalid="ignore"):
+        cand_v2 = real & (
+            (((accel > 9.0) | ((turn > 0.5) & (speed > 1.2))) & (d_nearest <= 2.5))
+            | ((d_nearest <= 1.5) & ((d_opp - d_nearest) >= 1.2) & (speed <= 7.0))
+        )
+    events_v2 = []
+    last_f, last_t = -10, -1
+    for f in np.flatnonzero(cand_v2):
+        t = int(nearest_team[f])
+        if f - last_f <= 3 and t == last_t:
+            last_f = f
+            continue
+        events_v2.append((int(f), t, bool(d_opp[f] <= 2.5)))
+        last_f, last_t = f, t
+
+    ctrl_mark = np.full(n, np.nan, dtype=np.float32)
+    for i, (f, team, _) in enumerate(events_v2):
+        if team < 0:
+            continue
+        next_same = i + 1 < len(events_v2) and events_v2[i + 1][1] == team
+        prev_same = i > 0 and events_v2[i - 1][1] == team
+        window = d_team[team][f:f + CONTROL_CARRY_FRAMES]
+        carry = len(window) == CONTROL_CARRY_FRAMES and bool(np.all(window <= CONTROL_RADIUS_M))
+        if next_same or prev_same or carry:
+            ctrl_mark[f] = 1.0 if team == HOME else -1.0
+
+    has_ctrl = ~np.isnan(ctrl_mark)
+    feats["ctrl_v2_ffill_sgn"] = _ffill(ctrl_mark, has_ctrl, np.nan)
+    feats["ctrl_v2_bfill_sgn"] = _bfill(ctrl_mark, has_ctrl, np.nan)
+    feats["t_since_ctrl_touch"] = _frames_since(has_ctrl, 500).astype(np.float32)
+    feats["t_to_ctrl_touch"] = _frames_until(has_ctrl, 500).astype(np.float32)
+    feats["control_next_sgn"] = feats["ctrl_v2_bfill_sgn"]
+
+    feats["touch_gap_len"] = feats["t_since_touch"] + feats["t_to_touch"]
+    feats["oob_latched"] = oob_latch_feature(
+        bx, by, known, speed, feats["collective_speed"], tr.pitch, blocks
+    )
+    feats["oob_latched_rm50"] = rolling_mean(feats["oob_latched"], 50)
+
+    step_full = np.hypot(np.diff(px, axis=0, prepend=np.nan), np.diff(py, axis=0, prepend=np.nan)) * fps
+    step_full = np.where(step_full <= 12.0, step_full, np.nan)
+    with np.errstate(invalid="ignore"):
+        run_frac = np.nanmean(step_full > 3.5, axis=1)
+    feats["frac_players_running"] = rolling_mean(run_frac, 25)
+    feats["frac_players_running_rm125"] = rolling_mean(run_frac, 125)
+
+    for base_col, arr in (
+        ("d_margin_sgn", feats["d_margin_sgn"]),
+        ("nearest_team_sgn", feats["nearest_team_sgn"]),
+        ("ctrl_v2_sgn", feats["ctrl_v2_ffill_sgn"]),
+        ("collective_speed", feats["collective_speed"]),
+        ("frac_walking", feats["frac_players_walking"]),
+    ):
+        for w in (35, 100):
+            feats[f"{base_col}_bwd{w}"] = one_sided_mean(arr, w, forward=False)
+            feats[f"{base_col}_fwd{w}"] = one_sided_mean(arr, w, forward=True)
 
     names = list(feats)
     X = np.column_stack([np.asarray(feats[k], dtype=np.float32) for k in names])

@@ -33,8 +33,8 @@ from mtah.model import DEFAULT_PARAMS, predict_proba, save, train, training_matr
 CV_PATH = paths.ROOT / "corpus" / "cv_results.json"
 OOF_PATH = paths.ROOT / "corpus" / "oof_proba.npz"
 DECODER_PATH = paths.MODELS_DIR / "decoder.json"
-GRID_PEN = [4, 6, 8, 10, 12, 15, 20, 25, 30, 40]
-GRID_MIN = [0, 13, 25, 38, 50]
+GRID_PEN = [6, 8, 10, 12, 15, 16, 18, 20, 25, 30]
+GRID_MIN = [0, 13, 25, 38, 45, 50]
 
 
 def load_corpus(noise_model, seeds, sandwich):
@@ -136,6 +136,7 @@ def main():
     sandwich = int(cfg["corpus"]["sportec_sandwich_max_frames"])
     n_rounds = 120 if args.quick else int(cfg["engine"]["n_rounds"])
     stride = 4 if args.quick else int(cfg["engine"]["train_stride"])
+    metrica_weight = int(cfg["engine"].get("metrica_weight", 2))
 
     baseline_ref = {}
     nv = paths.ROOT / "corpus" / "noise_validation.json"
@@ -164,7 +165,13 @@ def main():
     if not args.no_cv:
         oof = []
         for held in games:
-            t0 = time.time()
+            t0 = time.time(]
+            for p in parts:
+                if p["game"] != held:
+                    train_parts.append((p["X"], p["y"], names))
+                    if p["source"] == "metrica" and metrica_weight > 1:
+                        for _ in range(metrica_weight - 1):
+                            train_parts.append((p["X"], p["y"], names))
             train_parts = [(p["X"], p["y"], names) for p in parts if p["game"] != held]
             X, y = training_matrix(train_parts, stride=stride, augment=True)
             booster = train(X, y, names, n_rounds=n_rounds)
@@ -189,9 +196,17 @@ def main():
         CV_PATH.parent.mkdir(parents=True, exist_ok=True)
         CV_PATH.write_text(json.dumps({"decoder": decoder, "decoder_grid": table,
                                        "n_rounds": n_rounds, "stride": stride,
-                                       "seeds": args.seeds, "results": results}, indent=2))
-        DECODER_PATH.write_text(json.dumps(decoder, indent=2))
-        print(f"\n-> {CV_PATH}, {DECODER_PATH}")
+    all_parts = []
+    for p in parts:
+        all_parts.append((p["X"], p["y"], names))
+        if p["source"] == "metrica" and metrica_weight > 1:
+            for _ in range(metrica_weight - 1):
+                all_parts.append((p["X"], p["y"], names))
+    X, y = training_matrix(all_parts, stride=stride, augment=True)
+    booster = train(X, y, names, n_rounds=n_rounds)
+    save(booster, names, paths.MODELS_DIR, n_rounds, DEFAULT_PARAMS)
+    if decoder is None and "decoder" in cfg.get("engine", {}):
+        DECODER_PATH.write_text(json.dumps(cfg["engine"]["decoder"], indent=2)
 
     print("\ntraining final model on all matches ...")
     t0 = time.time()

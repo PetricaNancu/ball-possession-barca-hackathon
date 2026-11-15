@@ -311,8 +311,38 @@ def fragment_players(players: np.ndarray, team_of_player: np.ndarray, blocks,
 # Top level
 # --------------------------------------------------------------------------------------------
 
+def _unfreeze_provider_holds(ball: np.ndarray, blocks, seed: int) -> np.ndarray:
+    """Replace exact constant-position ball holds (Sportec freezes ball x,y when dead) with
+    smooth low-speed drift between endpoints so zero velocity does not leak the dead-ball label."""
+    out = ball.copy()
+    dx = np.diff(out[:, 0], prepend=np.nan)
+    dy = np.diff(out[:, 1], prepend=np.nan)
+    frozen = (dx == 0.0) & (dy == 0.0)
+    padded = np.concatenate(([False], frozen, [False]))
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    rng = np.random.default_rng(seed + 101)
+    for start, end in zip(edges[0::2], edges[1::2]):
+        if end - start < 5:
+            continue
+        p0 = out[max(0, start - 1), :2].copy()
+        p1 = out[min(len(out) - 1, end), :2].copy()
+        if np.isnan(p0[0]):
+            p0 = p1
+        if np.isnan(p1[0]):
+            p1 = p0
+        if np.isnan(p0[0]):
+            continue
+        length = end - start
+        t = np.linspace(0.0, 1.0, length)[:, None]
+        omega = 2.0 * np.pi * rng.uniform(0.5, 2.0)
+        amp = rng.uniform(1.0, 4.0, size=(1, 2))
+        drift = amp * np.sin(omega * t) * t * (1.0 - t) * 4.0
+        out[start:end, :2] = (1.0 - t) * p0 + t * p1 + drift
+    return out
+
+
 def degrade(tracking: Tracking, model: NoiseModel, seed: int) -> Tracking:
-    ball = tracking.ball.copy()
+    ball = _unfreeze_provider_holds(tracking.ball, tracking.blocks, seed)
     players = tracking.players.copy()
 
     ball[:, :2] = moving_average_runs(ball[:, :2], ~np.isnan(ball[:, 0]), model.ball_smooth_window)

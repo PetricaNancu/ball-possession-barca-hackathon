@@ -2,7 +2,7 @@
 
 PY        ?= .venv/bin/python
 VENDOR    := vendor/mtah2027
-TEAM      ?= $(shell $(PY) -c "import yaml;print(yaml.safe_load(open('configs/default.yaml'))['team'])" 2>/dev/null || echo our_team)
+TEAM      ?= The Digital Farmhouse
 # Data bundle: env var wins; otherwise the organisers' repo next to this one.
 MTAH_DATA_DIR ?= $(abspath ../more-than-a-hack-2027/data)
 export MTAH_DATA_DIR
@@ -48,10 +48,10 @@ submission:
 	$(PY) scripts/make_submission.py
 
 validate:
-	$(PY) $(VENDOR)/evaluation/validate_submission.py results/$(TEAM).csv
+	$(PY) $(VENDOR)/evaluation/validate_submission.py "results/$(TEAM).csv"
 
 evaluate:
-	$(PY) scripts/evaluate.py results/$(TEAM).csv $(VENDOR)/evaluation/results/baseline_smooth50.csv --bootstrap 1000
+	$(PY) scripts/evaluate.py "results/$(TEAM).csv" $(VENDOR)/evaluation/results/baseline_smooth50.csv --bootstrap 1000
 
 board:
 	$(PY) $(VENDOR)/evaluation/run_evaluation.py --results results --bootstrap 1000

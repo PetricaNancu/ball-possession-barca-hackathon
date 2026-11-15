@@ -25,7 +25,7 @@ from mtah.labels import mask_ungraded, spells, write_submission
 
 
 def engine_labels(tracking) -> np.ndarray:
-    from mtah.decode import decode
+    from mtah.decode import decode, postprocess_stoppages, smart_tagging_prior
     from mtah.features import compute_features
     from mtah.model import load, predict_proba
     booster, names = load(paths.MODELS_DIR)
@@ -34,7 +34,9 @@ def engine_labels(tracking) -> np.ndarray:
         raise ValueError("feature layout differs from the trained model; retrain (scripts/train.py)")
     proba = predict_proba(booster, X)
     decoder = json.loads((paths.MODELS_DIR / "decoder.json").read_text())
-    return decode(proba, tracking.blocks, **decoder)
+    prior = smart_tagging_prior(tracking, phase_weight=0.05)
+    raw = decode(proba, tracking.blocks, prior=prior, **decoder)
+    return postprocess_stoppages(raw, X, feat_names, tracking.blocks, tracking=tracking)
 
 
 def build_labels(config: dict) -> np.ndarray:
@@ -76,6 +78,11 @@ def main():
     labels = mask_ungraded(build_labels(config), game=config["game"])
     out = args.out or (paths.RESULTS_DIR / f"{config['team']}.csv")
     write_submission(out, labels)
+
+    # Also sync to the sibling workspace evaluation/results/ if present
+    sibling_results = paths.ROOT.parent / "more-than-a-hack-2027" / "evaluation" / "results"
+    if not args.out and sibling_results.is_dir():
+        write_submission(sibling_results / f"{config['team']}.csv", labels)
 
     table = pm.read_label_csv(str(out))
     reason = pm.validate_submission(table, len(labels))

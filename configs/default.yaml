@@ -1,6 +1,6 @@
 # Default configuration. Override any key with `--config path/to/other.yaml`.
 
-team: our_team            # names the submission file: evaluation/results/<team>.csv
+team: The Digital Farmhouse  # names the submission file: evaluation/results/<team>.csv
 game: BAR-ATH
 
 pipeline:
@@ -12,6 +12,11 @@ baseline:
 engine:
   n_rounds: 300           # LightGBM boosting rounds
   train_stride: 2         # keep every k-th graded frame for training (frames are highly correlated)
+  metrica_weight: 2       # Metrica matches share the exact provider & conventions as BAR-ATH
+  decoder:
+    switch_team: 16
+    switch_dead: 15
+    min_frames: 45
 
 corpus:
   # DFL BallPossession flips on single touches; spells shorter than this, sandwiched between the

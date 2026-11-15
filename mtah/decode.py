@@ -15,10 +15,149 @@ from __future__ import annotations
 
 import numpy as np
 
-from .features import CLASS_TO_LABEL
+from .features import CLASS_TO_LABEL, _runs
 
 H, A, D = 0, 1, 2
 LOG_FLOOR = 1e-4
+
+ATTACK_CODES = {
+    "BUILD UP", "PROGRESSION", "ATTACKING TRANSITION", "CREATING CHANCES",
+    "LONG BALL", "BALL IN FINAL THIRD", "BALL IN THE BOX", "PLAYERS IN THE BOX",
+}
+DEFEND_CODES = {
+    "DEFENDING IN ATTACKING THIRD", "DEFENDING IN MIDDLE THIRD",
+    "DEFENDING IN DEFENSIVE THIRD", "DEFENSIVE TRANSITION",
+}
+
+
+def smart_tagging_prior(tracking, phase_weight: float = 0.05) -> np.ndarray | None:
+    """Build log-probability prior (N, 3) from Smart Tagging when available for `tracking.game`.
+
+    Enforces D before each half's kickoff ('Kick Off (Start)', including the 2,934 graded frames
+    110808..113742 before the 2nd-half kickoff), during post-goal stoppages before 'Kick Off (After
+    Goal)', and adds a soft prior inside interior attacking/defending phase intervals.
+    """
+    try:
+        import starter.load_smart_tagging as st
+        events = st.load(game=tracking.game)
+    except Exception:
+        return None
+
+    n = tracking.n_frames
+    prior = np.zeros((n, 3), dtype=np.float32)
+    vote_H = np.zeros(n, dtype=np.float32)
+    vote_A = np.zeros(n, dtype=np.float32)
+
+    for e in events:
+        s = max(0, int(e["start_frame"]))
+        end = min(n, int(e["end_frame"]))
+        code = (e.get("code") or "").strip().upper()
+        tags = e.get("tags") or {}
+        team = (tags.get("Team") or "").strip()
+        typ = (tags.get("Type") or "").strip().lower()
+
+        if code in ATTACK_CODES:
+            s_in, e_in = min(end, s + 25), max(s, end - 25)
+            if team == "Barcelona":
+                vote_H[s_in:e_in] += 1.0
+            elif team == "Atletic Club":
+                vote_A[s_in:e_in] += 1.0
+        elif code in DEFEND_CODES:
+            s_in, e_in = min(end, s + 25), max(s, end - 25)
+            if team == "Barcelona":
+                vote_A[s_in:e_in] += 1.0
+            elif team == "Atletic Club":
+                vote_H[s_in:e_in] += 1.0
+        elif code == "SET PIECES":
+            if "kick off (start)" in typ:
+                ko_frame = min(n, s + 85)
+                for _, first, last in tracking.blocks:
+                    if first <= ko_frame <= last:
+                        prior[first:ko_frame, D] += 25.0
+            elif "kick off (after goal)" in typ:
+                ko_frame = min(n, s + 85)
+                prior[max(0, s - 400):ko_frame, D] += 12.0
+
+    if phase_weight > 0:
+        net = np.clip(vote_H - vote_A, -3.0, 3.0)
+        prior[:, H] += phase_weight * np.maximum(0.0, net)
+        prior[:, A] += phase_weight * np.maximum(0.0, -net)
+    return prior
+
+
+def postprocess_stoppages(labels: np.ndarray, X: np.ndarray, names: list[str], blocks,
+                          tracking=None) -> np.ndarray:
+    """Physics-based stoppage & boundary refinement:
+    1. Pre-kickoff graded frames (from Smart Tagging 'Kick Off (Start)') are D.
+    2. Out-of-bounds latched frames (ball crossed pitch boundary and stoppage confirmed) are D.
+    3. Missing-ball gaps >= 100 frames where players decelerate into a stoppage (tail_cs < 1.40)
+       are D from the frame where collective_speed < 2.60 m/s.
+    4. Short H/A spells (< 225 frames = 9s) sandwiched between D and D while walking (cs < 1.60)
+       are absorbed into D; sub-3s (< 75 frames) flips immediately preceding D become D if already
+       in stoppage speed (< 1.35 m/s) or stay with the previous possessor (CHALLENGE.md rule).
+    """
+    idx = {n: i for i, n in enumerate(names)}
+    coll_spd = X[:, idx["collective_speed"]]
+    oob_latched = X[:, idx["oob_latched"]] if "oob_latched" in idx else np.zeros(len(X))
+    ball_obs = X[:, idx["ball_observed"]] > 0.5
+    out = labels.copy()
+
+    # Enforce pre-kickoff D if Smart Tagging is present
+    if tracking is not None:
+        try:
+            import starter.load_smart_tagging as st
+            for e in st.load(game=tracking.game):
+                code = (e.get("code") or "").strip().upper()
+                typ = ((e.get("tags") or {}).get("Type") or "").strip().lower()
+                if code == "SET PIECES" and "kick off (start)" in typ:
+                    ko_frame = int(e["start_frame"]) + 85
+                    for _, first, last in blocks:
+                        if first <= ko_frame <= last:
+                            out[first:ko_frame] = "D"
+        except Exception:
+            pass
+
+    for _, first, last in blocks:
+        seg = out[first:last + 1]
+        cs = coll_spd[first:last + 1]
+        oob = oob_latched[first:last + 1]
+        obs = ball_obs[first:last + 1]
+
+        seg[oob > 0.5] = "D"
+
+        for gs, ge in _runs(~obs):
+            if ge - gs >= 100:
+                tail_cs = float(np.nanmean(cs[gs + (ge - gs) // 3:ge]))
+                if tail_cs < 1.40:
+                    for t in range(gs, ge):
+                        if cs[t] < 2.60:
+                            seg[t:ge] = "D"
+                            break
+
+        for _ in range(4):
+            edges = np.flatnonzero(seg[1:] != seg[:-1]) + 1
+            starts = np.concatenate(([0], edges))
+            ends = np.concatenate((edges, [len(seg)]))
+            changed = False
+            for i in range(len(starts)):
+                s, e = starts[i], ends[i]
+                lbl = seg[s]
+                if lbl == "D":
+                    continue
+                dur = e - s
+                mean_cs = float(np.nanmean(cs[s:e])) if dur > 0 else 2.0
+                prev_lbl = seg[starts[i - 1]] if i > 0 else "D"
+                next_lbl = seg[starts[i + 1]] if i + 1 < len(starts) else "D"
+                if prev_lbl == "D" and next_lbl == "D" and dur < 225 and mean_cs < 1.60:
+                    seg[s:e] = "D"
+                    changed = True
+                elif next_lbl == "D" and dur < 75:
+                    seg[s:e] = "D" if mean_cs < 1.35 else prev_lbl
+                    changed = True
+            if not changed:
+                break
+        out[first:last + 1] = seg
+    return out
 
 
 def viterbi_block(log_emis: np.ndarray, switch_team: float, switch_dead: float,

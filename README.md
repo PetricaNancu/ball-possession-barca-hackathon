@@ -1,16 +1,20 @@
-# mtah-possession
+# mtah-possession — The Digital Farmhouse
 
 Frame-level ball possession for **More than a Hack 2027 — Phase 1** (FC Barcelona vs Athletic
-Club). For every frame of the tactical video the system writes `H` (Barcelona in possession),
-`A` (Athletic), `D` (dead ball) or `X` (ungraded), from the provided automatic tracking, Smart
-Tagging and homographies. Ranked on `spellF1`.
+Club) by **The Digital Farmhouse**. For every frame of the tactical video (`0..199318`) the system
+writes `H` (Barcelona in possession), `A` (Athletic), `D` (dead ball) or `X` (ungraded), from the
+provided automatic tracking and Smart Tagging. Ranked on `spellF1`.
+
+- **Submission CSV**: `results/The Digital Farmhouse.csv`
+- **Technical Document**: `results/The Digital Farmhouse.md` (and detailed step-by-step reports in `docs/`)
 
 The approach, in one paragraph: a possession engine trained on **other matches** (open Sportec/DFL
-and Metrica sample data, degraded to look like automatic tracking), a physics/rule layer (touches,
-ballistic gap filling, dead-ball cues), and offline bidirectional decoding (Viterbi) tuned on the
-official metric over held-out external matches. No hand labels and no human-produced data about
-the competition match are used anywhere; the public 5-minute ground truth is a correctness smoke
-test only. Full plan: `docs/`.
+and Metrica sample data, degraded to look like automatic tracking), a bidirectional physics/rule
+layer (touches, controlled-possession state machine, one-sided past/future rolling windows,
+out-of-bounds latch, collective motion speeds), LightGBM emission probabilities, and offline
+Viterbi decoding with Smart Tagging priors and stoppage boundary refinement. No hand labels and no
+human-produced data about the competition match are used anywhere. Full technical documentation:
+`results/The Digital Farmhouse.md` and `docs/`.
 
 ## Layout
 
