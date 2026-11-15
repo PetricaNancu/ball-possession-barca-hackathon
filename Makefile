@@ -3,9 +3,8 @@
 PY        ?= .venv/bin/python
 VENDOR    := vendor/mtah2027
 TEAM      ?= The Digital Farmhouse
-# Data bundle: env var wins; otherwise the organisers' repo next to this one.
-MTAH_DATA_DIR ?= $(abspath ../more-than-a-hack-2027/data)
-export MTAH_DATA_DIR
+# Data bundle is resolved automatically by mtah/paths.py:
+#   1. $MTAH_DATA_DIR if set,  2. ./data if ./data/tactical exists,  3. ../more-than-a-hack-2027/data fallback.
 
 .PHONY: help setup check corpus noise train baseline submission validate evaluate board test clean
 

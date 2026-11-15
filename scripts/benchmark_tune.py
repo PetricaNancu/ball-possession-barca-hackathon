@@ -1,16 +1,18 @@
-"""Automated benchmarking, validation-split switching, rule ablation, and hyperparameter tuning.
+"""Automated external-corpus benchmarking, validation-split switching, rule ablation, and decoder tuning.
 
-Supports multiple validation strategies and hyperparameter/rule sweeps:
-  1. --val-split metrica       Train on Sportec (7 matches), validate on Metrica (3 matches)
+All hyperparameter tuning and model/rule selection run strictly on the external degraded corpus
+(Sportec x7 + Metrica x3) — never on BAR-ATH or the 5-minute public ground truth (RULES.md).
+
+Supported external validation splits:
+  1. --val-split loo           Full 10-match Leave-One-Match-Out CV (Sportec x7 + Metrica x3) [default]
   2. --val-split metrica-loo   Train on Sportec (7) + 2 Metrica matches, validate on held-out Metrica (3 folds)
-  3. --val-split loo           Full 10-match Leave-One-Match-Out CV (Sportec x7 + Metrica x3)
-  4. --val-split custom        Custom validation matches via --val-matches (e.g., --val-matches metrica1 J03WPY)
-  5. --val-split public-5min   Fast sweep on the 5-minute BAR-ATH public benchmark using trained model
+  3. --val-split metrica       Train on Sportec (7 matches), validate on Metrica (3 matches)
+  4. --val-split custom        Custom external validation matches via --val-matches (e.g., --val-matches metrica1 J03WPY)
 
 Usage:
-    python scripts/benchmark_tune.py --val-split public-5min --update-submission
-    python scripts/benchmark_tune.py --val-split metrica --update-submission
-    python scripts/benchmark_tune.py --val-split metrica-loo --seeds 0 1 --update-submission
+    python scripts/benchmark_tune.py --val-split loo --reuse-oof --update-submission
+    python scripts/benchmark_tune.py --val-split metrica-loo --update-submission
+    python scripts/benchmark_tune.py --val-split metrica --retrain-final --update-submission
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -25,19 +29,18 @@ import _bootstrap  # noqa: F401
 import numpy as np
 
 import mtah  # noqa: F401
-import possession_metrics as pm
 from mtah import paths
 from mtah.config import load_config
-from mtah.decode import argmax_labels, decode, postprocess_stoppages, smart_tagging_prior
+from mtah.decode import argmax_labels, decode, postprocess_stoppages
 from mtah.degrade import NoiseModel, degrade
-from mtah.evaluate import score, summarize
+from mtah.evaluate import score
 from mtah.external import corpus_labels
 from mtah.features import LABEL_TO_CLASS, compute_features
-from mtah.io import Tracking, load_tracking
-from mtah.labels import mask_ungraded, write_submission
-from mtah.model import DEFAULT_PARAMS, load, predict_proba, save, train, training_matrix
+from mtah.io import Tracking
+from mtah.model import DEFAULT_PARAMS, predict_proba, save, train, training_matrix
 
 BENCHMARK_OUT = paths.ROOT / "corpus" / "benchmark_tuning_report.json"
+OOF_PATH = paths.ROOT / "corpus" / "oof_proba.npz"
 
 
 def load_degraded_corpus(noise_model: NoiseModel, seeds: list[int], sandwich: int) -> list[dict]:
@@ -89,9 +92,12 @@ def run_validation_split(parts: list[dict], val_split: str, custom_val: list[str
     elif val_split == "custom":
         if not custom_val:
             raise ValueError("--val-matches is required when --val-split=custom")
+        invalid = [g for g in custom_val if "BAR-ATH" in g or g not in all_games]
+        if invalid:
+            raise ValueError(f"Invalid or disallowed validation matches: {invalid}; valid external matches: {all_games}")
         folds = [custom_val]
     else:
-        return []
+        raise ValueError(f"Unsupported validation split: {val_split}")
 
     oof = []
     for held_list in folds:
@@ -108,64 +114,142 @@ def run_validation_split(parts: list[dict], val_split: str, custom_val: list[str
                 })
                 raw = score(p["labels"], argmax_labels(proba, p["blocks"]))
                 print(f"  val {p['game']:<10} trained on {len(X_tr):>8} rows ({time.time() - t0:.0f}s) -> "
-                      f"argmax spellF1={raw['spell_f1']:.4f} macroF1={raw['macro_f1']:.4f}")
+                      f"argmax spellF1={raw['spell_f1']:.4f} macroF1={raw['macro_f1']:.4f}", flush=True)
         del X_tr, y_tr, booster
     return oof
 
 
-def sweep_on_5min(proba_bar: np.ndarray, X_bar: np.ndarray, names: list[str],
-                  bar_tracking: Tracking, gt_codes: np.ndarray,
-                  grid_team: list[int], grid_dead: list[int],
-                  grid_min: list[int], grid_phase: list[float]) -> tuple[dict, list[dict]]:
+def load_cached_oof_for_split(parts: list[dict], val_split: str, custom_val: list[str]) -> list[dict]:
+    if not OOF_PATH.is_file():
+        raise FileNotFoundError(f"No cached OOF file at {OOF_PATH}; run without --reuse-oof first.")
+    z = np.load(OOF_PATH)
+    primary_seed = parts[0]["seed"]
+    by_game = {p["game"]: p for p in parts if p["seed"] == primary_seed}
+    cached_games = sorted({k.split("__")[0] for k in z.files})
+    if val_split in ("metrica", "metrica-loo"):
+        wanted = [g for g in cached_games if g.startswith("metrica")]
+    elif val_split == "loo":
+        wanted = cached_games
+    elif val_split == "custom":
+        wanted = [g for g in custom_val if g in cached_games and "BAR-ATH" not in g]
+    else:
+        raise ValueError(f"Unsupported validation split: {val_split}")
+
+    oof = []
+    for g in wanted:
+        p = by_game[g]
+        oof.append({
+            "game": g,
+            "source": str(z[f"{g}__source"]),
+            "proba": z[f"{g}__proba"].astype(np.float32),
+            "X": p["X"],
+            "names": p["names"],
+            "labels": z[f"{g}__labels"],
+            "blocks": z[f"{g}__blocks"],
+        })
+    return oof
+
+
+def _agg_external(rows: list[dict], sources: list[str], metrica_weight: float) -> dict:
+    weights = np.array([metrica_weight if s == "metrica" else 1.0 for s in sources], dtype=np.float64)
+    weights /= weights.sum()
+    w_mean = lambda key: float(np.sum([r[key] * w for r, w in zip(rows, weights)]))
+    u_mean = lambda key: float(np.mean([r[key] for r in rows]))
+    out = {
+        "spell_f1": w_mean("spell_f1"),
+        "macro_f1": w_mean("macro_f1"),
+        "f1_H": w_mean("f1_H"),
+        "f1_A": w_mean("f1_A"),
+        "f1_D": w_mean("f1_D"),
+        "recall_D": w_mean("recall_D"),
+        "mean_pred_spells": u_mean("n_pred_spells"),
+        "corpus_spell_f1": u_mean("spell_f1"),
+        "corpus_macro_f1": u_mean("macro_f1"),
+    }
+    m_rows = [r for r, s in zip(rows, sources) if s == "metrica"]
+    s_rows = [r for r, s in zip(rows, sources) if s == "sportec"]
+    if m_rows:
+        out["metrica_spell_f1"] = float(np.mean([r["spell_f1"] for r in m_rows]))
+        out["metrica_macro_f1"] = float(np.mean([r["macro_f1"] for r in m_rows]))
+    if s_rows:
+        out["sportec_spell_f1"] = float(np.mean([r["spell_f1"] for r in s_rows]))
+        out["sportec_macro_f1"] = float(np.mean([r["macro_f1"] for r in s_rows]))
+    return out
+
+
+def sweep_on_external_oof(oof: list[dict], grid_team: list[int], grid_dead: list[int],
+                          grid_min: list[int], metrica_weight: float, top_k: int = 4) -> tuple[dict, list[dict]]:
+    sources = [o["source"] for o in oof]
     table = []
-    # 1. Argmax ablation
-    raw_arg = argmax_labels(proba_bar, bar_tracking.blocks)
-    r_arg = pm.evaluate(gt_codes, pm.label_codes(raw_arg))
+
+    # 1. Argmax ablation on held-out external matches
+    arg_rows = [score(o["labels"], argmax_labels(o["proba"], o["blocks"])) for o in oof]
     table.append({
         "variant": "argmax_only", "switch_team": 0, "switch_dead": 0, "min_frames": 0,
-        "phase_weight": 0.0, "postprocess": False,
-        "spell_f1": float(r_arg["spell_f1_mean"]), "macro_f1": float(r_arg["macro_f1"]),
-        "accuracy": float(r_arg["accuracy"]),
-        "f1_H": float(r_arg["per_class"]["H"]["f1"]),
-        "f1_A": float(r_arg["per_class"]["A"]["f1"]),
-        "f1_D": float(r_arg["per_class"]["D"]["f1"]),
-        "recall_D": float(r_arg["per_class"]["D"]["recall"]),
-        "n_pred_spells": int(r_arg["n_pred_spells"]),
+        "postprocess": False,
+        **_agg_external(arg_rows, sources, metrica_weight),
     })
 
-    # 2. Grid search over decoder + Smart Tagging phase weight + stoppage rules
-    priors = {pw: smart_tagging_prior(bar_tracking, phase_weight=pw) for pw in grid_phase}
-    for st_pen, sd_pen, mf, pw in itertools.product(grid_team, grid_dead, grid_min, grid_phase):
-        viterbi_pred = decode(proba_bar, bar_tracking.blocks, st_pen, sd_pen, mf, prior=priors[pw])
-        for use_post in (False, True):
-            pred = (postprocess_stoppages(viterbi_pred, X_bar, names, bar_tracking.blocks, tracking=bar_tracking)
-                    if use_post else viterbi_pred)
-            res = pm.evaluate(gt_codes, pm.label_codes(pred))
+    # 2. Stage 1: sweep (switch_team, switch_dead) at min_frames=0 for Viterbi-only and Viterbi+rules
+    stage1 = []
+    for st_pen, sd_pen in itertools.product(grid_team, grid_dead):
+        vit_preds = [decode(o["proba"], o["blocks"], st_pen, sd_pen, 0) for o in oof]
+        rows_vit = [score(o["labels"], p) for o, p in zip(oof, vit_preds)]
+        rec_vit = {
+            "variant": "viterbi_only", "switch_team": st_pen, "switch_dead": sd_pen,
+            "min_frames": 0, "postprocess": False,
+            **_agg_external(rows_vit, sources, metrica_weight),
+        }
+        stage1.append(rec_vit)
+
+        rows_rul = [
+            score(o["labels"], postprocess_stoppages(p, o["X"], o["names"], o["blocks"]))
+            for o, p in zip(oof, vit_preds)
+        ]
+        rec_rul = {
+            "variant": "viterbi+rules", "switch_team": st_pen, "switch_dead": sd_pen,
+            "min_frames": 0, "postprocess": True,
+            **_agg_external(rows_rul, sources, metrica_weight),
+        }
+        stage1.append(rec_rul)
+
+    table.extend(stage1)
+
+    # 3. Stage 2: sweep min_frames > 0 on top_k candidates of each variant
+    top_candidates = []
+    for variant in ("viterbi_only", "viterbi+rules"):
+        sub = sorted([r for r in stage1 if r["variant"] == variant],
+                     key=lambda r: (-r["spell_f1"], -r["macro_f1"]))
+        top_candidates.extend(sub[:top_k])
+
+    for base in top_candidates:
+        for mf in grid_min:
+            if mf == 0:
+                continue
+            vit_preds = [decode(o["proba"], o["blocks"], base["switch_team"], base["switch_dead"], mf) for o in oof]
+            if base["postprocess"]:
+                preds = [postprocess_stoppages(p, o["X"], o["names"], o["blocks"]) for o, p in zip(oof, vit_preds)]
+            else:
+                preds = vit_preds
+            rows = [score(o["labels"], p) for o, p in zip(oof, preds)]
             table.append({
-                "variant": "viterbi+rules" if use_post else "viterbi_only",
-                "switch_team": st_pen, "switch_dead": sd_pen, "min_frames": mf,
-                "phase_weight": pw, "postprocess": use_post,
-                "spell_f1": float(res["spell_f1_mean"]), "macro_f1": float(res["macro_f1"]),
-                "accuracy": float(res["accuracy"]),
-                "f1_H": float(res["per_class"]["H"]["f1"]),
-                "f1_A": float(res["per_class"]["A"]["f1"]),
-                "f1_D": float(res["per_class"]["D"]["f1"]),
-                "recall_D": float(res["per_class"]["D"]["recall"]),
-                "n_pred_spells": int(res["n_pred_spells"]),
+                "variant": base["variant"], "switch_team": base["switch_team"],
+                "switch_dead": base["switch_dead"], "min_frames": mf,
+                "postprocess": base["postprocess"],
+                **_agg_external(rows, sources, metrica_weight),
             })
 
-    # Rank by spell_f1 desc, then macro_f1 desc, then accuracy desc
-    table.sort(key=lambda r: (-r["spell_f1"], -r["macro_f1"], -r["accuracy"]))
+    table.sort(key=lambda r: (-r["spell_f1"], -r["macro_f1"]))
     return table[0], table
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--val-split", default="public-5min",
-                        choices=["public-5min", "metrica", "metrica-loo", "loo", "custom"],
-                        help="validation split strategy")
+    parser.add_argument("--val-split", default="loo",
+                        choices=["loo", "metrica-loo", "metrica", "custom"],
+                        help="external validation split strategy (never BAR-ATH)")
     parser.add_argument("--val-matches", nargs="+", default=[],
-                        help="match IDs for --val-split custom")
+                        help="external match IDs for --val-split custom")
     parser.add_argument("--seeds", type=int, nargs="+", default=[0],
                         help="degradation seeds per external match")
     parser.add_argument("--n-rounds", type=int, default=300,
@@ -173,11 +257,13 @@ def main():
     parser.add_argument("--stride", type=int, default=2,
                         help="training frame subsampling stride")
     parser.add_argument("--metrica-weight", type=int, default=2,
-                        help="sample weight multiplier for Metrica matches")
+                        help="provider weight multiplier for Metrica matches")
+    parser.add_argument("--reuse-oof", action="store_true",
+                        help="reuse cached corpus/oof_proba.npz instead of retraining CV folds")
     parser.add_argument("--retrain-final", action="store_true",
                         help="retrain final LightGBM model on all external matches")
     parser.add_argument("--update-submission", action="store_true",
-                        help="save best decoder params and regenerate team submission CSV")
+                        help="save best external-CV decoder params and regenerate submission CSV")
     parser.add_argument("--config", help="optional YAML config override")
     args = parser.parse_args()
 
@@ -185,87 +271,84 @@ def main():
     sandwich = int(cfg["corpus"]["sportec_sandwich_max_frames"])
     noise_model = NoiseModel.load(paths.MODELS_DIR / "noise_model.npz")
 
-    oof_summary = []
-    if args.val_split != "public-5min" or args.retrain_final or not (paths.MODELS_DIR / "engine_lgbm.txt").is_file():
-        print(f"=== Loading degraded external corpus (seeds={args.seeds}, sandwich={sandwich}) ===")
-        parts = load_degraded_corpus(noise_model, args.seeds, sandwich)
-        names = parts[0]["names"]
+    print(f"=== Loading degraded external corpus (seeds={args.seeds}, sandwich={sandwich}) ===")
+    parts = load_degraded_corpus(noise_model, args.seeds, sandwich)
+    names = parts[0]["names"]
 
-        if args.val_split != "public-5min":
-            print(f"\n=== Running external validation split: {args.val_split} ===")
-            oof = run_validation_split(
-                parts, args.val_split, args.val_matches,
-                args.n_rounds, args.stride, args.metrica_weight
-            )
-            for o in oof:
-                dec = decode(o["proba"], o["blocks"], 16, 15, 45)
-                sc = score(o["labels"], dec)
-                oof_summary.append({"game": o["game"], "source": o["source"], **sc})
-                print(f"  {o['game']:<10} ({o['source']:<7}) decoded spellF1={sc['spell_f1']:.4f} "
-                      f"macroF1={sc['macro_f1']:.4f} f1_D={sc['f1_D']:.4f} poss={sc['n_pred_spells']}/{sc['n_gt_spells']}")
-            if oof_summary:
-                mean_sp = np.mean([r["spell_f1"] for r in oof_summary])
-                mean_ma = np.mean([r["macro_f1"] for r in oof_summary])
-                print(f"  Validation Mean ({args.val_split}): spellF1={mean_sp:.4f} macroF1={mean_ma:.4f}")
-
-        if args.retrain_final or not (paths.MODELS_DIR / "engine_lgbm.txt").is_file():
-            print("\n=== Training final LightGBM model on full external corpus ===")
-            t0 = time.time()
-            X_tr, y_tr = build_weighted_train_matrix(parts, set(), args.metrica_weight, args.stride)
-            booster = train(X_tr, y_tr, names, n_rounds=args.n_rounds)
-            save(booster, names, paths.MODELS_DIR, args.n_rounds, DEFAULT_PARAMS)
-            print(f"  saved model ({len(X_tr)} rows, {args.n_rounds} rounds, {time.time() - t0:.1f}s) -> {paths.MODELS_DIR / 'engine_lgbm.txt'}")
-
-    print("\n=== Benchmarking & Hyperparameter Sweep on BAR-ATH 5-min Public GT ===")
-    booster, model_names = load(paths.MODELS_DIR)
-    bar = load_tracking(cfg["game"])
-    X_bar, feat_names = compute_features(bar)
-    if feat_names != model_names:
-        raise RuntimeError(
-            f"Feature mismatch ({len(feat_names)} vs {len(model_names)} in saved model). "
-            "Run with --retrain-final first."
+    if args.reuse_oof:
+        print(f"\n=== Loading cached out-of-fold predictions for external split: {args.val_split} ===")
+        oof = load_cached_oof_for_split(parts, args.val_split, args.val_matches)
+    else:
+        print(f"\n=== Running external validation split: {args.val_split} ===")
+        oof = run_validation_split(
+            parts, args.val_split, args.val_matches,
+            args.n_rounds, args.stride, args.metrica_weight
         )
-    proba_bar = predict_proba(booster, X_bar)
-    gt_path = str(paths.GT_DIR / "BAR-ATH_possession_gt_public.csv")
-    gt_codes = pm.label_codes(pm.read_label_csv(gt_path))
+        if args.val_split == "loo":
+            payload = {}
+            for o in oof:
+                payload[f"{o['game']}__proba"] = o["proba"].astype(np.float16)
+                payload[f"{o['game']}__labels"] = o["labels"]
+                payload[f"{o['game']}__blocks"] = o["blocks"]
+                payload[f"{o['game']}__source"] = np.array(o["source"])
+            np.savez_compressed(OOF_PATH, **payload)
+            print(f"  cached 10-fold external OOF probabilities -> {OOF_PATH}")
 
-    grid_team = [8, 10, 12, 14, 15, 16, 18]
-    grid_dead = [10, 12, 15, 20, 25]
-    grid_min = [0, 25, 45, 50]
-    grid_phase = [0.0, 0.05]
+    print(f"\n=== Hyperparameter & Rule Ablation Sweep on External Split ({args.val_split}, n={len(oof)} matches) ===")
+    grid_team = [4, 6, 7, 8, 10, 12, 15, 18, 20, 25]
+    grid_dead = [10, 15, 20, 25, 30, 35, 40, 50]
+    grid_min = [0, 13, 20, 25, 35, 45]
 
-    best, table = sweep_on_5min(
-        proba_bar, X_bar, feat_names, bar, gt_codes,
-        grid_team, grid_dead, grid_min, grid_phase
+    best, table = sweep_on_external_oof(
+        oof, grid_team, grid_dead, grid_min, metrica_weight=float(args.metrica_weight)
     )
 
-    print(f"\nTop 10 Configurations on 5-min Public Benchmark:")
-    print(f"{'rank':>4}  {'variant':<14} {'st':>3} {'sd':>3} {'mf':>3} {'pw':>4}  "
-          f"{'spellF1':>8} {'macroF1':>8} {'acc':>8} {'f1_D':>7} {'rec_D':>7} {'poss':>5}")
-    print("-" * 88)
+    print(f"\nTop 10 Configurations on External Validation ({args.val_split}):")
+    print(f"{'rank':>4}  {'variant':<14} {'st':>3} {'sd':>3} {'mf':>3}  "
+          f"{'w_spF1':>8} {'w_maF1':>8} {'met_spF1':>9} {'spo_spF1':>9} {'f1_D':>7} {'poss':>6}")
+    print("-" * 92)
     for rank, row in enumerate(table[:10], start=1):
+        m_sp = row.get("metrica_spell_f1", float("nan"))
+        s_sp = row.get("sportec_spell_f1", float("nan"))
         print(f"{rank:>4}  {row['variant']:<14} {row['switch_team']:>3} {row['switch_dead']:>3} "
-              f"{row['min_frames']:>3} {row['phase_weight']:>4.2f}  "
-              f"{row['spell_f1']:>8.4f} {row['macro_f1']:>8.4f} {row['accuracy']:>8.4f} "
-              f"{row['f1_D']:>7.4f} {row['recall_D']:>7.4f} {row['n_pred_spells']:>5}")
+              f"{row['min_frames']:>3}  "
+              f"{row['spell_f1']:>8.4f} {row['macro_f1']:>8.4f} {m_sp:>9.4f} {s_sp:>9.4f} "
+              f"{row['f1_D']:>7.4f} {row['mean_pred_spells']:>6.1f}")
 
-    # Also show ablation comparison (argmax vs viterbi_only vs viterbi+rules)
     best_arg = next(r for r in table if r["variant"] == "argmax_only")
     best_vit = next(r for r in table if r["variant"] == "viterbi_only")
     best_rul = next(r for r in table if r["variant"] == "viterbi+rules")
-    print("\n=== Ablation Summary (5-min Public Benchmark) ===")
+    print(f"\n=== External Validation Ablation Summary ({args.val_split}) ===")
     for label, row in [
         ("1. Emission Argmax only (no Viterbi)", best_arg),
         ("2. Emission + Viterbi (no stoppage rules)", best_vit),
-        ("3. Full Engine (Viterbi + Smart Tagging + Rules)", best_rul),
+        ("3. Full Engine (Viterbi + Stoppage Rules)", best_rul),
     ]:
-        print(f"  {label:<48} spellF1={row['spell_f1']:.4f}  macroF1={row['macro_f1']:.4f}  "
-              f"acc={row['accuracy']:.4f}  f1_D={row['f1_D']:.4f}  poss={row['n_pred_spells']}")
+        print(f"  {label:<46} w_spellF1={row['spell_f1']:.4f}  w_macroF1={row['macro_f1']:.4f}  "
+              f"f1_D={row['f1_D']:.4f}  mean_poss={row['mean_pred_spells']:.1f}")
+
+    oof_per_match = []
+    for o in oof:
+        vit = decode(o["proba"], o["blocks"], best["switch_team"], best["switch_dead"], best["min_frames"])
+        pred = postprocess_stoppages(vit, o["X"], o["names"], o["blocks"]) if best["postprocess"] else vit
+        sc = score(o["labels"], pred)
+        oof_per_match.append({"game": o["game"], "source": o["source"], **sc})
+        print(f"  {o['game']:<10} ({o['source']:<7}) spellF1={sc['spell_f1']:.4f} "
+              f"macroF1={sc['macro_f1']:.4f} f1_D={sc['f1_D']:.4f} poss={sc['n_pred_spells']}/{sc['n_gt_spells']}")
+
+    if args.retrain_final or not (paths.MODELS_DIR / "engine_lgbm.txt").is_file():
+        print("\n=== Training final LightGBM model on full external corpus ===")
+        t0 = time.time()
+        X_tr, y_tr = build_weighted_train_matrix(parts, set(), args.metrica_weight, args.stride)
+        booster = train(X_tr, y_tr, names, n_rounds=args.n_rounds)
+        save(booster, names, paths.MODELS_DIR, args.n_rounds, DEFAULT_PARAMS)
+        print(f"  saved model ({len(X_tr)} rows, {args.n_rounds} rounds, {time.time() - t0:.1f}s) -> {paths.MODELS_DIR / 'engine_lgbm.txt'}")
 
     report_payload = {
         "val_split": args.val_split,
-        "external_validation": oof_summary,
-        "best_5min_config": best,
+        "metrica_weight": args.metrica_weight,
+        "best_external_config": best,
+        "external_per_match": oof_per_match,
         "ablation": {
             "argmax_only": best_arg,
             "viterbi_only": best_vit,
@@ -275,32 +358,22 @@ def main():
     }
     BENCHMARK_OUT.parent.mkdir(parents=True, exist_ok=True)
     BENCHMARK_OUT.write_text(json.dumps(report_payload, indent=2))
-    print(f"\nSaved benchmark report -> {BENCHMARK_OUT}")
+    print(f"\nSaved external benchmark report -> {BENCHMARK_OUT}")
 
     if args.update_submission:
         decoder_cfg = {
-            "switch_team": best_rul["switch_team"],
-            "switch_dead": best_rul["switch_dead"],
-            "min_frames": best_rul["min_frames"],
+            "switch_team": int(best["switch_team"]),
+            "switch_dead": int(best["switch_dead"]),
+            "min_frames": int(best["min_frames"]),
+            "postprocess": bool(best["postprocess"]),
         }
         (paths.MODELS_DIR / "decoder.json").write_text(json.dumps(decoder_cfg, indent=2))
-        print(f"Updated {paths.MODELS_DIR / 'decoder.json'} -> {decoder_cfg}")
+        print(f"Updated {paths.MODELS_DIR / 'decoder.json'} (from external {args.val_split}) -> {decoder_cfg}")
 
-        prior = smart_tagging_prior(bar, phase_weight=best_rul["phase_weight"])
-        raw_labels = decode(proba_bar, bar.blocks, prior=prior, **decoder_cfg)
-        final_labels = postprocess_stoppages(raw_labels, X_bar, feat_names, bar.blocks, tracking=bar)
-        final_labels = mask_ungraded(final_labels, game=cfg["game"])
-
-        team_name = cfg["team"]
-        out_path = paths.RESULTS_DIR / f"{team_name}.csv"
-        write_submission(out_path, final_labels)
-        print(f"Wrote submission -> {out_path}")
-
-        sibling_results = paths.ROOT.parent / "more-than-a-hack-2027" / "evaluation" / "results"
-        if sibling_results.is_dir():
-            sib_path = sibling_results / f"{team_name}.csv"
-            write_submission(sib_path, final_labels)
-            print(f"Synced submission -> {sib_path}")
+        sub_cmd = [sys.executable, str(paths.ROOT / "scripts" / "make_submission.py")]
+        if args.config:
+            sub_cmd.extend(["--config", args.config])
+        subprocess.run(sub_cmd, cwd=str(paths.ROOT), check=True)
 
 
 if __name__ == "__main__":

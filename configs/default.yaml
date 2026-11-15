@@ -13,10 +13,13 @@ engine:
   n_rounds: 300           # LightGBM boosting rounds
   train_stride: 2         # keep every k-th graded frame for training (frames are highly correlated)
   metrica_weight: 2       # Metrica matches share the exact provider & conventions as BAR-ATH
+  smart_tagging_phase_weight: 0.05  # fixed soft log-prior inside interior Smart Tagging phases
+  postprocess: false      # evaluated on external LOO CV; emission features + Viterbi outperform heuristic post-filter
   decoder:
-    switch_team: 16
-    switch_dead: 15
-    min_frames: 45
+    switch_team: 8
+    switch_dead: 50
+    min_frames: 20
+    postprocess: false
 
 corpus:
   # DFL BallPossession flips on single touches; spells shorter than this, sandwiched between the

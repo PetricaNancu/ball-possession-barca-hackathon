@@ -24,7 +24,7 @@ from mtah.io import load_tracking
 from mtah.labels import mask_ungraded, spells, write_submission
 
 
-def engine_labels(tracking) -> np.ndarray:
+def engine_labels(tracking, config: dict | None = None) -> np.ndarray:
     from mtah.decode import decode, postprocess_stoppages, smart_tagging_prior
     from mtah.features import compute_features
     from mtah.model import load, predict_proba
@@ -34,9 +34,19 @@ def engine_labels(tracking) -> np.ndarray:
         raise ValueError("feature layout differs from the trained model; retrain (scripts/train.py)")
     proba = predict_proba(booster, X)
     decoder = json.loads((paths.MODELS_DIR / "decoder.json").read_text())
-    prior = smart_tagging_prior(tracking, phase_weight=0.05)
-    raw = decode(proba, tracking.blocks, prior=prior, **decoder)
-    return postprocess_stoppages(raw, X, feat_names, tracking.blocks, tracking=tracking)
+    eng_cfg = (config or {}).get("engine", {})
+    phase_weight = float(eng_cfg.get("smart_tagging_phase_weight", 0.05))
+    use_postprocess = bool(decoder.get("postprocess", eng_cfg.get("postprocess", True)))
+    viterbi_params = {
+        "switch_team": decoder["switch_team"],
+        "switch_dead": decoder["switch_dead"],
+        "min_frames": decoder["min_frames"],
+    }
+    prior = smart_tagging_prior(tracking, phase_weight=phase_weight)
+    raw = decode(proba, tracking.blocks, prior=prior, **viterbi_params)
+    if use_postprocess:
+        return postprocess_stoppages(raw, X, feat_names, tracking.blocks, tracking=tracking)
+    return raw
 
 
 def build_labels(config: dict) -> np.ndarray:
@@ -45,7 +55,7 @@ def build_labels(config: dict) -> np.ndarray:
     if method == "baseline":
         return baseline_labels(tracking, window=int(config["baseline"]["window"]))
     if method == "engine":
-        return engine_labels(tracking)
+        return engine_labels(tracking, config=config)
     raise ValueError(f"unknown pipeline method {method!r}")
 
 
@@ -78,11 +88,6 @@ def main():
     labels = mask_ungraded(build_labels(config), game=config["game"])
     out = args.out or (paths.RESULTS_DIR / f"{config['team']}.csv")
     write_submission(out, labels)
-
-    # Also sync to the sibling workspace evaluation/results/ if present
-    sibling_results = paths.ROOT.parent / "more-than-a-hack-2027" / "evaluation" / "results"
-    if not args.out and sibling_results.is_dir():
-        write_submission(sibling_results / f"{config['team']}.csv", labels)
 
     table = pm.read_label_csv(str(out))
     reason = pm.validate_submission(table, len(labels))

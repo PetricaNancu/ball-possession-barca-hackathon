@@ -1,5 +1,6 @@
 {
   "switch_team": 8,
-  "switch_dead": 10,
-  "min_frames": 45
+  "switch_dead": 50,
+  "min_frames": 20,
+  "postprocess": false
 }

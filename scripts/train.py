@@ -22,9 +22,9 @@ import numpy as np
 
 from mtah import paths
 from mtah.config import load_config
-from mtah.decode import argmax_labels, decode
+from mtah.decode import argmax_labels, decode, postprocess_stoppages
 from mtah.degrade import NoiseModel, degrade
-from mtah.evaluate import score, summarize
+from mtah.evaluate import score
 from mtah.external import corpus_labels
 from mtah.features import LABEL_TO_CLASS, compute_features
 from mtah.io import Tracking
@@ -33,8 +33,9 @@ from mtah.model import DEFAULT_PARAMS, predict_proba, save, train, training_matr
 CV_PATH = paths.ROOT / "corpus" / "cv_results.json"
 OOF_PATH = paths.ROOT / "corpus" / "oof_proba.npz"
 DECODER_PATH = paths.MODELS_DIR / "decoder.json"
-GRID_PEN = [6, 8, 10, 12, 15, 16, 18, 20, 25, 30]
-GRID_MIN = [0, 13, 25, 38, 45, 50]
+GRID_TEAM = [4, 6, 7, 8, 10, 12, 15, 18, 20, 25]
+GRID_DEAD = [10, 15, 20, 25, 30, 35, 40, 50]
+GRID_MIN = [0, 13, 20, 25, 35, 45]
 
 
 def load_corpus(noise_model, seeds, sandwich):
@@ -56,24 +57,84 @@ def load_corpus(noise_model, seeds, sandwich):
     return parts
 
 
-def tune_decoder(oof, grid_team, grid_dead, grid_min, top_k=3):
-    """Grid search on pooled out-of-fold predictions; min_frames is searched for the top_k
-    penalty pairs. Returns (best params, table)."""
+def _weighted_summary(rows: list[dict], sources: list[str], metrica_weight: float) -> dict:
+    weights = np.array([metrica_weight if s == "metrica" else 1.0 for s in sources], dtype=np.float64)
+    weights /= weights.sum()
+    keys = ("spell_f1", "macro_f1", "f1_D", "recall_D")
+    out = {k: float(np.sum([r[k] * w for r, w in zip(rows, weights)])) for k in keys}
+    out["corpus_spell_f1"] = float(np.mean([r["spell_f1"] for r in rows]))
+    out["corpus_macro_f1"] = float(np.mean([r["macro_f1"] for r in rows]))
+    metrica_rows = [r for r, s in zip(rows, sources) if s == "metrica"]
+    sportec_rows = [r for r, s in zip(rows, sources) if s == "sportec"]
+    if metrica_rows:
+        out["metrica_spell_f1"] = float(np.mean([r["spell_f1"] for r in metrica_rows]))
+        out["metrica_macro_f1"] = float(np.mean([r["macro_f1"] for r in metrica_rows]))
+    if sportec_rows:
+        out["sportec_spell_f1"] = float(np.mean([r["spell_f1"] for r in sportec_rows]))
+        out["sportec_macro_f1"] = float(np.mean([r["macro_f1"] for r in sportec_rows]))
+    return out
+
+
+def decode_oof_entry(entry: dict, st: float, sd: float, mf: int, use_post: bool) -> np.ndarray:
+    pred = decode(entry["proba"], entry["blocks"], st, sd, mf)
+    if use_post and "X" in entry:
+        pred = postprocess_stoppages(pred, entry["X"], entry["names"], entry["blocks"])
+    return pred
+
+
+def tune_decoder(oof, grid_team, grid_dead, grid_min, metrica_weight: float = 2.0, top_k: int = 4):
+    """Two-stage grid search on pooled out-of-fold external predictions (never BAR-ATH)."""
+    sources = [o["source"] for o in oof]
+    has_features = all("X" in o for o in oof)
+    post_opts = (False, True) if has_features else (False,)
+
     table = []
     for st, sd in itertools.product(grid_team, grid_dead):
-        rows = [score(o["labels"], decode(o["proba"], o["blocks"], st, sd, 0)) for o in oof]
-        table.append({"switch_team": st, "switch_dead": sd, "min_frames": 0, **summarize(rows)})
-    top = sorted(table, key=lambda r: -r["spell_f1"])[:top_k]
-    for base in top:
+        vit_preds = [decode(o["proba"], o["blocks"], st, sd, 0) for o in oof]
+        rows_vit = [score(o["labels"], p) for o, p in zip(oof, vit_preds)]
+        table.append({
+            "switch_team": st, "switch_dead": sd, "min_frames": 0, "postprocess": False,
+            **_weighted_summary(rows_vit, sources, metrica_weight),
+        })
+        if True in post_opts:
+            rows_post = [
+                score(o["labels"], postprocess_stoppages(p, o["X"], o["names"], o["blocks"]))
+                for o, p in zip(oof, vit_preds)
+            ]
+            table.append({
+                "switch_team": st, "switch_dead": sd, "min_frames": 0, "postprocess": True,
+                **_weighted_summary(rows_post, sources, metrica_weight),
+            })
+
+    candidates = []
+    for use_post in post_opts:
+        sub = [r for r in table if r["postprocess"] == use_post]
+        sub.sort(key=lambda r: (-r["spell_f1"], -r["macro_f1"]))
+        candidates.extend(sub[:top_k])
+
+    for base in candidates:
         for mf in grid_min:
             if mf == 0:
                 continue
-            rows = [score(o["labels"], decode(o["proba"], o["blocks"], base["switch_team"],
-                                                 base["switch_dead"], mf)) for o in oof]
-            table.append({"switch_team": base["switch_team"], "switch_dead": base["switch_dead"],
-                          "min_frames": mf, **summarize(rows)})
-    best = max(table, key=lambda r: r["spell_f1"])
-    return {k: best[k] for k in ("switch_team", "switch_dead", "min_frames")}, table
+            rows = [
+                score(o["labels"], decode_oof_entry(o, base["switch_team"], base["switch_dead"], mf, base["postprocess"]))
+                for o in oof
+            ]
+            table.append({
+                "switch_team": base["switch_team"], "switch_dead": base["switch_dead"],
+                "min_frames": mf, "postprocess": base["postprocess"],
+                **_weighted_summary(rows, sources, metrica_weight),
+            })
+
+    table.sort(key=lambda r: (-r["spell_f1"], -r["macro_f1"]))
+    best = table[0]
+    decoder = {
+        "switch_team": int(best["switch_team"]),
+        "switch_dead": int(best["switch_dead"]),
+        "min_frames": int(best["min_frames"]),
+        "postprocess": bool(best["postprocess"]),
+    }
+    return decoder, table
 
 
 def save_oof(oof):
@@ -86,20 +147,36 @@ def save_oof(oof):
     np.savez_compressed(OOF_PATH, **payload)
 
 
-def load_oof():
+def load_oof(parts_by_game: dict | None = None):
     z = np.load(OOF_PATH)
     games = sorted({k.split("__")[0] for k in z.files})
-    return [{"game": g, "source": str(z[f"{g}__source"]), "proba": z[f"{g}__proba"].astype(np.float32),
-             "labels": z[f"{g}__labels"], "blocks": z[f"{g}__blocks"]} for g in games]
+    out = []
+    for g in games:
+        entry = {
+            "game": g,
+            "source": str(z[f"{g}__source"]),
+            "proba": z[f"{g}__proba"].astype(np.float32),
+            "labels": z[f"{g}__labels"],
+            "blocks": z[f"{g}__blocks"],
+        }
+        if parts_by_game and g in parts_by_game:
+            entry["X"] = parts_by_game[g]["X"]
+            entry["names"] = parts_by_game[g]["names"]
+        out.append(entry)
+    return out
 
 
 def report(oof, decoder, baseline_ref):
     print(f"\n{'match':<10}{'src':<8}{'base spF1':>10}{'base maF1':>10}{'argmax spF1':>12}"
           f"{'argmax maF1':>12}{'decoded spF1':>13}{'decoded maF1':>13}{'f1_D':>7}{'pred':>6}{'gt':>5}")
     results = {}
+    st = decoder["switch_team"]
+    sd = decoder["switch_dead"]
+    mf = decoder["min_frames"]
+    use_post = bool(decoder.get("postprocess", True))
     for o in oof:
         raw = score(o["labels"], argmax_labels(o["proba"], o["blocks"]))
-        dec = score(o["labels"], decode(o["proba"], o["blocks"], **decoder))
+        dec = score(o["labels"], decode_oof_entry(o, st, sd, mf, use_post))
         b = baseline_ref.get(o["game"], {})
         results[o["game"]] = {"source": o["source"], "argmax": raw, "decoded": dec,
                               "baseline": {k: b.get(k) for k in ("spell_f1", "macro_f1")}}
@@ -124,6 +201,18 @@ def report(oof, decoder, baseline_ref):
     return results
 
 
+def _weighted_train_parts(parts: list[dict], held_out: set[str], names: list[str], metrica_weight: int):
+    train_parts = []
+    for p in parts:
+        if p["game"] in held_out:
+            continue
+        train_parts.append((p["X"], p["y"], names))
+        if p["source"] == "metrica" and metrica_weight > 1:
+            for _ in range(metrica_weight - 1):
+                train_parts.append((p["X"], p["y"], names))
+    return train_parts
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--quick", action="store_true")
@@ -143,74 +232,74 @@ def main():
     if nv.is_file():
         baseline_ref = json.loads(nv.read_text()).get("degraded", {})
 
-    if args.decoder_only:
-        oof = load_oof()
-        decoder, table = tune_decoder(oof, GRID_PEN, GRID_PEN, GRID_MIN)
-        print(f"best decoder: {decoder}")
-        results = report(oof, decoder, baseline_ref)
-        cv = json.loads(CV_PATH.read_text()) if CV_PATH.is_file() else {}
-        cv.update({"decoder": decoder, "decoder_grid": table, "results": results})
-        CV_PATH.write_text(json.dumps(cv, indent=2))
-        DECODER_PATH.write_text(json.dumps(decoder, indent=2))
-        print(f"\n-> {CV_PATH}, {DECODER_PATH}")
-        return
-
     noise_model = NoiseModel.load(paths.MODELS_DIR / "noise_model.npz")
     print("building degraded corpus features ...")
     parts = load_corpus(noise_model, args.seeds, sandwich)
     names = parts[0]["names"]
     games = sorted({p["game"] for p in parts})
+    parts_by_game = {p["game"]: p for p in parts if p["seed"] == args.seeds[0]}
+
+    if args.decoder_only:
+        oof = load_oof(parts_by_game=parts_by_game)
+        decoder, table = tune_decoder(oof, GRID_TEAM, GRID_DEAD, GRID_MIN, metrica_weight=metrica_weight)
+        print(f"best decoder (external OOF): {decoder}")
+        results = report(oof, decoder, baseline_ref)
+        cv = json.loads(CV_PATH.read_text()) if CV_PATH.is_file() else {}
+        cv.update({"decoder": decoder, "decoder_grid": table[:40], "results": results})
+        CV_PATH.write_text(json.dumps(cv, indent=2))
+        DECODER_PATH.write_text(json.dumps(decoder, indent=2))
+        print(f"\n-> {CV_PATH}, {DECODER_PATH}")
+        return
 
     decoder = None
     if not args.no_cv:
         oof = []
         for held in games:
-            t0 = time.time(]
-            for p in parts:
-                if p["game"] != held:
-                    train_parts.append((p["X"], p["y"], names))
-                    if p["source"] == "metrica" and metrica_weight > 1:
-                        for _ in range(metrica_weight - 1):
-                            train_parts.append((p["X"], p["y"], names))
-            train_parts = [(p["X"], p["y"], names) for p in parts if p["game"] != held]
+            t0 = time.time()
+            train_parts = _weighted_train_parts(parts, {held}, names, metrica_weight)
             X, y = training_matrix(train_parts, stride=stride, augment=True)
             booster = train(X, y, names, n_rounds=n_rounds)
-            for p in parts:
-                if p["game"] == held and p["seed"] == args.seeds[0]:
-                    proba = predict_proba(booster, p["X"])
-                    oof.append({"game": held, "source": p["source"], "proba": proba,
-                                "labels": p["labels"], "blocks": p["blocks"]})
+            p_val = parts_by_game[held]
+            proba = predict_proba(booster, p_val["X"])
+            oof.append({
+                "game": held, "source": p_val["source"], "proba": proba,
+                "X": p_val["X"], "names": names,
+                "labels": p_val["labels"], "blocks": p_val["blocks"],
+            })
             raw = score(oof[-1]["labels"], argmax_labels(oof[-1]["proba"], oof[-1]["blocks"]))
             print(f"fold {held:<10} trained on {len(X):>8} rows in {time.time() - t0:5.0f}s  "
                   f"argmax spellF1 {raw['spell_f1']:.3f} macroF1 {raw['macro_f1']:.3f}", flush=True)
             del X, y, booster
         save_oof(oof)
 
-        print("\ntuning decoder on out-of-fold probabilities ...", flush=True)
-        grid_pen = GRID_PEN if not args.quick else [4, 8, 15]
-        grid_min = GRID_MIN if not args.quick else [0, 25]
-        decoder, table = tune_decoder(oof, grid_pen, grid_pen, grid_min)
-        print(f"best decoder: {decoder}")
+        print("\ntuning decoder + stoppage post-processing on external out-of-fold probabilities ...", flush=True)
+        grid_team = GRID_TEAM if not args.quick else [8, 15, 20]
+        grid_dead = GRID_DEAD if not args.quick else [10, 20, 30]
+        grid_min = GRID_MIN if not args.quick else [0, 25, 45]
+        decoder, table = tune_decoder(oof, grid_team, grid_dead, grid_min, metrica_weight=metrica_weight)
+        print(f"best decoder (external OOF): {decoder}")
         results = report(oof, decoder, baseline_ref)
 
         CV_PATH.parent.mkdir(parents=True, exist_ok=True)
-        CV_PATH.write_text(json.dumps({"decoder": decoder, "decoder_grid": table,
-                                       "n_rounds": n_rounds, "stride": stride,
-    all_parts = []
-    for p in parts:
-        all_parts.append((p["X"], p["y"], names))
-        if p["source"] == "metrica" and metrica_weight > 1:
-            for _ in range(metrica_weight - 1):
-                all_parts.append((p["X"], p["y"], names))
-    X, y = training_matrix(all_parts, stride=stride, augment=True)
-    booster = train(X, y, names, n_rounds=n_rounds)
-    save(booster, names, paths.MODELS_DIR, n_rounds, DEFAULT_PARAMS)
-    if decoder is None and "decoder" in cfg.get("engine", {}):
-        DECODER_PATH.write_text(json.dumps(cfg["engine"]["decoder"], indent=2)
+        CV_PATH.write_text(json.dumps({
+            "decoder": decoder,
+            "metrica_weight": metrica_weight,
+            "n_rounds": n_rounds,
+            "stride": stride,
+            "seeds": args.seeds,
+            "results": results,
+            "decoder_grid": table[:40],
+        }, indent=2))
+        DECODER_PATH.write_text(json.dumps(decoder, indent=2))
+        print(f"saved CV report & decoder -> {CV_PATH}, {DECODER_PATH}")
 
-    print("\ntraining final model on all matches ...")
+    if decoder is None and "decoder" in cfg.get("engine", {}) and not DECODER_PATH.is_file():
+        DECODER_PATH.write_text(json.dumps(cfg["engine"]["decoder"], indent=2))
+
+    print("\ntraining final model on all external matches ...")
     t0 = time.time()
-    X, y = training_matrix([(p["X"], p["y"], names) for p in parts], stride=stride, augment=True)
+    all_parts = _weighted_train_parts(parts, set(), names, metrica_weight)
+    X, y = training_matrix(all_parts, stride=stride, augment=True)
     booster = train(X, y, names, n_rounds=n_rounds)
     save(booster, names, paths.MODELS_DIR, n_rounds, DEFAULT_PARAMS)
     print(f"final model: {len(X)} rows, {n_rounds} rounds, {time.time() - t0:.0f}s -> "

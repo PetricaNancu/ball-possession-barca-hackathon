@@ -12,40 +12,58 @@ The approach, in one paragraph: a possession engine trained on **other matches**
 and Metrica sample data, degraded to look like automatic tracking), a bidirectional physics/rule
 layer (touches, controlled-possession state machine, one-sided past/future rolling windows,
 out-of-bounds latch, collective motion speeds), LightGBM emission probabilities, and offline
-Viterbi decoding with Smart Tagging priors and stoppage boundary refinement. No hand labels and no
-human-produced data about the competition match are used anywhere. Full technical documentation:
+Viterbi decoding with Smart Tagging priors — with all model and decoder hyperparameters tuned
+exclusively via leave-one-match-out cross-validation on the external corpus. No hand labels and no
+human-produced data about the competition match are used anywhere, and the 5-minute public ground
+truth is used strictly as a post-hoc correctness smoke test. Full technical documentation:
 `results/The Digital Farmhouse.md` and `docs/`.
 
 ## Layout
 
-Everything outside `vendor/` is ours.
+Everything needed to train, validate, and reproduce the submission lives in this repository (nothing is required outside it except the gated match data bundle):
 
 ```
 mtah/                 the package: io (canonical tracking), external (other-match corpora), harmonise,
                       noise + degrade (simulator), features (rule layer), model (LightGBM), decode (Viterbi),
                       evaluate, labels, baseline, config, paths
 scripts/              check_data, build_corpus, analyze_conventions, noise_stats, fit_noise, train,
-                      make_submission, evaluate
-configs/default.yaml  team name, pipeline method, parameters
-results/              our submission CSV(s)
+                      benchmark_tune, make_submission, evaluate
+configs/default.yaml  team name, pipeline method, model & decoder parameters
+data/                 gated competition match bundle (tactical/ & broadcast/), strictly gitignored
+results/              Technical Document (The Digital Farmhouse.md) + generated submission CSV (gitignored)
 cache/                parsed tracking (.npz), gitignored
-corpus/               external-match ground truths, noise targets, CV results; gitignored except targets
-models/               committed artefacts: noise_model.npz, engine_lgbm.txt, engine_features.json, decoder.json
+corpus/               external-match ground truths, noise targets, CV results; gitignored except noise_targets.json
+models/               committed trained model weights & parameters (see below)
 docs/                 one file per step: method, metrics, caveats
-tests/
+plan/                 architecture explainers & design notes
+tests/                unit & reference-baseline regression tests
 vendor/mtah2027/      unmodified copies from the organisers' repo (MIT, see NOTICE.md):
                       games.py, evaluation/ (scorer, validator, metrics, public GT, baselines), starter/
 ```
 
+## Trained Model & Weights (`models/`)
+
+All trained weights and calibrated parameters are committed directly in `models/` (and `corpus/noise_targets.json`) so `make submission` reproduces the exact submission CSV on CPU without retraining:
+
+| File | Role |
+|---|---|
+| `models/engine_lgbm.txt` | Trained 3-class LightGBM emission model weights (`300` boosting rounds, `111` features, trained on degraded Sportec ×7 + Metrica ×3 with H/A swap augmentation) |
+| `models/engine_features.json` | Ordered `111`-feature schema and LightGBM training hyperparameters |
+| `models/decoder.json` | External-CV tuned Viterbi decoder parameters (`switch_team=8`, `switch_dead=50`, `min_frames=20`, `postprocess=false`) |
+| `models/noise_model.npz` | Fitted noise-simulator distributions & hazards (calibrated to label-free `BAR-ATH` ATD statistics) |
+| `corpus/noise_targets.json` | Label-free `BAR-ATH` input summary targets consumed by `scripts/fit_noise.py` |
+
 ## Setup
+
+Unpack the competition data bundle into `./data/` (so `./data/tactical/` and `./data/broadcast/` exist; `data/` is gitignored), or point `MTAH_DATA_DIR` at an existing data folder:
 
 ```bash
 make setup                                 # .venv with pinned deps (Python 3.12)
-export MTAH_DATA_DIR=/path/to/data         # folder containing tactical/ and broadcast/
+# Either unpack tactical/ and broadcast/ into ./data/ (auto-detected), or set:
+export MTAH_DATA_DIR=/path/to/data         # optional override if data lives elsewhere
 make check                                 # verifies alignment, builds the cache, prints stats
 ```
 
-If `MTAH_DATA_DIR` is unset, `../more-than-a-hack-2027/data` is used when it exists.
 The data bundle is gated and is never committed.
 
 ## External training corpus (other matches only)

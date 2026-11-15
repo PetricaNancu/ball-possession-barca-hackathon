@@ -16,6 +16,7 @@ from __future__ import annotations
 import numpy as np
 
 from .features import CLASS_TO_LABEL, _runs
+from .noise import ball_speed_from_positions
 
 H, A, D = 0, 1, 2
 LOG_FLOOR = 1e-4
@@ -30,12 +31,39 @@ DEFEND_CODES = {
 }
 
 
+def detect_kickoff_frame(tracking, start_frame: int, end_frame: int) -> int:
+    """Detect the kickoff strike inside a Smart Tagging kickoff window [start_frame, end_frame].
+
+    Finds the last frame where the ball rests near the centre spot (<= 3.0 m, speed < 1.5 m/s)
+    before being put into play, returning the immediately following frame. Falls back to the
+    tagged window midpoint when the ball is unobserved across the window.
+    """
+    s = max(0, int(start_frame))
+    end = min(tracking.n_frames, int(end_frame))
+    if end <= s:
+        return s
+    cx, cy = tracking.pitch[0] / 2.0, tracking.pitch[1] / 2.0
+    bx = tracking.ball[s:end, 0]
+    by = tracking.ball[s:end, 1]
+    spd = ball_speed_from_positions(tracking.ball[s:end, :2], tracking.fps)
+    last_stationary = None
+    for idx in range(end - s):
+        if np.isfinite(bx[idx]):
+            d_c = float(np.hypot(bx[idx] - cx, by[idx] - cy))
+            v = float(spd[idx]) if np.isfinite(spd[idx]) else 0.0
+            if d_c <= 3.0 and v < 1.5:
+                last_stationary = s + idx
+    if last_stationary is not None and last_stationary + 1 < end:
+        return last_stationary + 1
+    return (s + end) // 2
+
+
 def smart_tagging_prior(tracking, phase_weight: float = 0.05) -> np.ndarray | None:
     """Build log-probability prior (N, 3) from Smart Tagging when available for `tracking.game`.
 
-    Enforces D before each half's kickoff ('Kick Off (Start)', including the 2,934 graded frames
-    110808..113742 before the 2nd-half kickoff), during post-goal stoppages before 'Kick Off (After
-    Goal)', and adds a soft prior inside interior attacking/defending phase intervals.
+    Enforces D before each half's kickoff ('Kick Off (Start)', detected algorithmically inside the
+    tagged restart window), during post-goal stoppages before 'Kick Off (After Goal)', and adds a
+    soft prior inside interior attacking/defending phase intervals.
     """
     try:
         import starter.load_smart_tagging as st
@@ -70,12 +98,12 @@ def smart_tagging_prior(tracking, phase_weight: float = 0.05) -> np.ndarray | No
                 vote_H[s_in:e_in] += 1.0
         elif code == "SET PIECES":
             if "kick off (start)" in typ:
-                ko_frame = min(n, s + 85)
+                ko_frame = detect_kickoff_frame(tracking, s, end)
                 for _, first, last in tracking.blocks:
                     if first <= ko_frame <= last:
                         prior[first:ko_frame, D] += 25.0
             elif "kick off (after goal)" in typ:
-                ko_frame = min(n, s + 85)
+                ko_frame = detect_kickoff_frame(tracking, s, end)
                 prior[max(0, s - 400):ko_frame, D] += 12.0
 
     if phase_weight > 0:
@@ -88,7 +116,8 @@ def smart_tagging_prior(tracking, phase_weight: float = 0.05) -> np.ndarray | No
 def postprocess_stoppages(labels: np.ndarray, X: np.ndarray, names: list[str], blocks,
                           tracking=None) -> np.ndarray:
     """Physics-based stoppage & boundary refinement:
-    1. Pre-kickoff graded frames (from Smart Tagging 'Kick Off (Start)') are D.
+    1. Pre-kickoff graded frames (up to the detected kickoff strike inside Smart Tagging 'Kick Off
+       (Start)') are D.
     2. Out-of-bounds latched frames (ball crossed pitch boundary and stoppage confirmed) are D.
     3. Missing-ball gaps >= 100 frames where players decelerate into a stoppage (tail_cs < 1.40)
        are D from the frame where collective_speed < 2.60 m/s.
@@ -110,7 +139,7 @@ def postprocess_stoppages(labels: np.ndarray, X: np.ndarray, names: list[str], b
                 code = (e.get("code") or "").strip().upper()
                 typ = ((e.get("tags") or {}).get("Type") or "").strip().lower()
                 if code == "SET PIECES" and "kick off (start)" in typ:
-                    ko_frame = int(e["start_frame"]) + 85
+                    ko_frame = detect_kickoff_frame(tracking, int(e["start_frame"]), int(e["end_frame"]))
                     for _, first, last in blocks:
                         if first <= ko_frame <= last:
                             out[first:ko_frame] = "D"
